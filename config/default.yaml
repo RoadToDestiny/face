@@ -1,0 +1,40 @@
+# Emotion Recognition Pipeline - Default Configuration
+
+# Face Detection (MTCNN)
+face_detection:
+  confidence_threshold: 0.9
+  align_faces: true
+  detection_size: [640, 640]
+
+# Emotion Model (ResNet18)
+emotion:
+  num_classes: 7  # anger, disgust, fear, happy, sad, surprise, neutral
+  input_size: 112  # FER2013 uses 48x48, we use 112 for better quality
+  model: resnet18  # resnet18 | resnet34 | resnet50
+  checkpoint: null  # path to trained weights
+
+# FER2013 class labels
+emotion_labels:
+  0: anger
+  1: disgust
+  2: fear
+  3: happy
+  4: sad
+  5: surprise
+  6: neutral
+
+# Training
+training:
+  batch_size: 64
+  epochs: 80
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler: cosine  # cosine | step | plateau
+  num_workers: 4
+  data_dir: ./data
+
+# Video Stream
+stream:
+  fps_target: 15
+  max_queued_frames: 2
+  process_every_n_frames: 1
