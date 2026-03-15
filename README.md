@@ -52,6 +52,19 @@ python scripts/train_emotion.py --data-dir ./data --output ./checkpoints --epoch
 
 ## Запуск
 
+### Графический интерфейс (выбор источника)
+```bash
+python scripts/run_ui.py
+```
+
+В интерфейсе можно выбрать:
+- изображение
+- видеофайл
+- веб-камеру
+
+Предпросмотр отображается прямо в окне интерфейса.
+Для видео/веб-камеры используйте кнопку `Start` для запуска и `Stop` для остановки.
+
 ### Видеофайл или изображение
 ```bash
 python scripts/run_inference.py video.mp4 --model checkpoints/best_emotion_model.pt
