@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+"""Helper: writes run_ui.py with proper UTF-8 encoding."""
+import pathlib
+
+TARGET = pathlib.Path(__file__).parent / "run_ui.py"
+
+CONTENT = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Emotion AI – merged dashboard UI.
 
@@ -71,7 +76,8 @@ LIGHT: dict[str, str] = {
     "tree_head":  "#E8ECF4",
     "tree_sel":   "#C7D2FE",
 }
-
+''' + \
+'''
 
 class EmotionApp:
     """Dashboard UI: visual from dashboard sketch + full source/model controls."""
@@ -980,8 +986,8 @@ class EmotionApp:
         )
         self.overlay_lbl.configure(
             text=(
-                f"{final} \u00b7 face {self.overlay_face}"
-                f" \u00b7 voice {self.speech_sentiment}"
+                f"{final} \\u00b7 face {self.overlay_face}"
+                f" \\u00b7 voice {self.speech_sentiment}"
             )
         )
 
@@ -1023,3 +1029,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+'''
+
+TARGET.write_text(CONTENT, encoding="utf-8")
+print("Written", TARGET, TARGET.stat().st_size, "bytes")
