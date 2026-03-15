@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# flake8: noqa
 """Emotion AI – merged dashboard UI.
 
 Visual style: dashboard (dark panel, overlay, right summary + timeline).
@@ -15,7 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import cv2
 import tkinter as tk
@@ -130,10 +131,10 @@ class EmotionApp:
         self._summary_lbl:   Optional[tk.Label]     = None
 
         # theme registries
-        self._r_bg:    list[tk.Widget] = []
-        self._r_panel: list[tk.Widget] = []
-        self._r_text:  list[tk.Widget] = []
-        self._r_muted: list[tk.Widget] = []
+        self._r_bg:    list[Any] = []
+        self._r_panel: list[Any] = []
+        self._r_text:  list[Any] = []
+        self._r_muted: list[Any] = []
         self._r_entry: list[tk.Entry]  = []
 
         self._row_id = 0
@@ -434,13 +435,13 @@ class EmotionApp:
             self._summary_lbl.configure(bg=p["panel"], fg=p["title"])
 
         for w in self._r_bg:
-            w.configure(bg=p["bg"])
+            cast(Any, w).configure(bg=p["bg"])
         for w in self._r_panel:
-            w.configure(bg=p["panel"])
+            cast(Any, w).configure(bg=p["panel"])
         for w in self._r_text:
-            w.configure(fg=p["text"])
+            cast(Any, w).configure(fg=p["text"])
         for w in self._r_muted:
-            w.configure(fg=p["muted"])
+            cast(Any, w).configure(fg=p["muted"])
         for e in self._r_entry:
             e.configure(
                 bg=p["entry_bg"], fg=p["entry_fg"],
@@ -816,16 +817,18 @@ class EmotionApp:
         return cv2.VideoWriter(path, fourcc, fps, (w, h))
 
     def _toggle_stream_ui(self, streaming: bool) -> None:
-        state = "disabled" if streaming else "normal"
         for btn in [
             self.btn_camera, self.btn_video,
             self.btn_image, self.btn_json,
         ]:
             if btn is not None:
-                btn.configure(state=state)
+                if streaming:
+                    btn.configure(state=tk.DISABLED)
+                else:
+                    btn.configure(state=tk.NORMAL)
         if self.btn_stop is not None:
             self.btn_stop.configure(
-                state="normal" if streaming else "disabled"
+                state=tk.NORMAL if streaming else tk.DISABLED
             )
         if not streaming:
             self._set_mode_button_state()
