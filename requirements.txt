@@ -1,25 +1,23 @@
 # Emotion Recognition Pipeline
 # Python 3.9+
 
-# Core
+# Core Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Face Detection (MTCNN - PyTorch native, good accuracy)
+# Face Detection
 facenet-pytorch>=2.5.0
 
-# Video & Image
+# Computer Vision & Image Processing
 opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
 
-# Config & Utils
-pyyaml>=6.0
+# Utilities
 tqdm>=4.65.0
+opendatasets>=0.1.20
 
-# Optional: for FER2013 download (pip install opendatasets)
-# opendatasets
-
-# Optional: for dashboard (future)
-# flask>=3.0
-# flask-socketio>=5.3
+# Optional dependencies (uncomment as needed)
+# pyyaml>=6.0  # For YAML config files if used
+# flask>=3.0  # For web UI
+# flask-socketio>=5.3  # For websocket support in dashboard
