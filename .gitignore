@@ -12,7 +12,6 @@ venv/
 data/
 *.pt
 *.pth
-
 # IDE
 .idea/
 .vscode/
