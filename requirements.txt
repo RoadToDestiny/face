@@ -1,6 +1,12 @@
 # Emotion Recognition Pipeline
 # Python 3.9+
 
+
+
+# эщкерре
+
+
+
 # Core Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
