@@ -8,13 +8,14 @@ import argparse
 import sys
 from pathlib import Path
 
+# Ensure project root is importable when running as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import torch
 from torch.utils.data import DataLoader
 from src.emotion.fer2013_dataset import get_fer2013_dataset
 from torchvision import transforms
 from tqdm import tqdm
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.emotion import create_emotion_model
 

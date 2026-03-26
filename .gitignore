@@ -10,7 +10,6 @@ venv/
 
 # Data & Models
 data/
-checkpoints/
 *.pt
 *.pth
 
