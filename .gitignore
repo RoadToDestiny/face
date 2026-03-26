@@ -10,8 +10,7 @@ venv/
 
 # Data & Models
 data/
-*.pt
-*.pth
+
 # IDE
 .idea/
 .vscode/
