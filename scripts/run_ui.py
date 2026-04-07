@@ -148,11 +148,14 @@ class EmotionApp:
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _default_model(self) -> str:
-        p = (
-            Path(__file__).resolve().parent.parent
-            / "checkpoints" / "best_emotion_model.pt"
-        )
-        return str(p) if p.exists() else ""
+        root = Path(__file__).resolve().parent.parent
+        raf = root / "checkpoints_rafdb" / "best_emotion_model.pt"
+        fer = root / "checkpoints" / "best_emotion_model.pt"
+        if raf.exists():
+            return str(raf)
+        if fer.exists():
+            return str(fer)
+        return ""
 
     # ── UI build ──────────────────────────────────────────────────────────────
 
