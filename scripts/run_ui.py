@@ -25,6 +25,8 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.audio.speech_to_text import VoskMicrophoneRecognizer
+
 # ── Palettes ──────────────────────────────────────────────────────────────────
 
 DARK: dict[str, str] = {
@@ -91,6 +93,7 @@ class EmotionApp:
         self.source_type  = tk.StringVar(value="webcam")
         self.input_path   = tk.StringVar(value="")
         self.model_path   = tk.StringVar(value=self._default_model())
+        self.vosk_model_path = tk.StringVar(value=self._default_vosk_model())
         self.output_path  = tk.StringVar(value="")
         self.camera_idx   = tk.IntVar(value=0)
 
@@ -101,12 +104,17 @@ class EmotionApp:
         self.speech_var        = tk.StringVar(value="Speech: NEUTRAL (0.93)")
         self.toxicity_var      = tk.StringVar(value="Toxicity: NEUTRAL (0.0)")
         self.text_var          = tk.StringVar(value="Text: ~")
+        self.subtitle_var      = tk.StringVar(value="Subtitles: ~")
 
         # internal
         self.speech_sentiment  = "NEUTRAL"
         self.speech_confidence = 0.93
         self.toxicity_score    = 0.0
         self.overlay_face      = "NEUTRAL"
+        self.voice_enabled     = False
+        self.voice_recognizer: Optional[VoskMicrophoneRecognizer] = None
+        self.final_subtitle    = ""
+        self.partial_subtitle  = ""
 
         self.pipeline: Optional[Any]           = None
         self.cap:      Optional[cv2.VideoCapture] = None
@@ -125,10 +133,12 @@ class EmotionApp:
         self.btn_video:      Optional[tk.Button]    = None
         self.btn_image:      Optional[tk.Button]    = None
         self.btn_json:       Optional[tk.Button]    = None
+        self.btn_voice:      Optional[tk.Button]    = None
         self.btn_stop:       Optional[tk.Button]    = None
         self.btn_settings:   Optional[tk.Button]    = None
         self.btn_theme:      Optional[tk.Button]    = None
         self._summary_lbl:   Optional[tk.Label]     = None
+        self.subtitle_lbl:   Optional[tk.Label]     = None
 
         # theme registries
         self._r_bg:    list[Any] = []
@@ -155,6 +165,24 @@ class EmotionApp:
             return str(raf)
         if fer.exists():
             return str(fer)
+        return ""
+
+    def _default_vosk_model(self) -> str:
+        root = Path(__file__).resolve().parent.parent
+        candidates = [
+            root / "vosk-model-small-ru-0.22",
+            root / "vosk-model-ru-0.42",
+            root / "vosk-model-small-en-us-0.15",
+            root / "models" / "vosk-model-small-ru-0.22",
+            root / "models" / "vosk-model-ru-0.42",
+            root / "models" / "vosk-model-small-en-us-0.15",
+        ]
+        for path in candidates:
+            if path.exists() and path.is_dir():
+                return str(path)
+        for path in list(root.glob("vosk-model*")) + list((root / "models").glob("vosk-model*")):
+            if path.exists() and path.is_dir():
+                return str(path)
         return ""
 
     # ── UI build ──────────────────────────────────────────────────────────────
@@ -200,6 +228,10 @@ class EmotionApp:
         self.btn_json = self._mkbtn(
             src_grp, "Open JSON", self._on_open_json, 14)
         self.btn_json.pack(side="left", padx=4)
+
+        self.btn_voice = self._mkbtn(
+            src_grp, "Voice: Off", self._on_voice_toggle, 14)
+        self.btn_voice.pack(side="left", padx=4)
 
         self.btn_stop = self._mkbtn(
             src_grp, "Stop", self._on_stop_clicked, 10,
@@ -294,6 +326,16 @@ class EmotionApp:
         )
         self.overlay_lbl.place(x=16, y=16)
 
+        self.subtitle_lbl = tk.Label(
+            self._video_shell,
+            bg="#000000", fg="#FFFFFF",
+            font=("Segoe UI", 11, "bold"),
+            padx=10, pady=6, anchor="w",
+            justify="left",
+            text="",
+        )
+        self.subtitle_lbl.place(relx=0.03, rely=0.92, relwidth=0.94, anchor="w")
+
         self._footer = tk.Frame(parent, bg=p["panel"], height=28)
         self._footer.pack(fill="x", padx=(8, 4), pady=(0, 8))
         self._footer.pack_propagate(False)
@@ -330,7 +372,7 @@ class EmotionApp:
 
         for var in [
             self.source_var, self.face_var,
-            self.speech_var, self.toxicity_var, self.text_var,
+            self.speech_var, self.toxicity_var, self.text_var, self.subtitle_var,
         ]:
             lbl = tk.Label(
                 top,
@@ -434,6 +476,8 @@ class EmotionApp:
             self.preview_lbl.configure(bg=p["video"], fg=p["muted"])
         if self.overlay_lbl is not None:
             self.overlay_lbl.configure(bg=p["overlay"])
+        if self.subtitle_lbl is not None:
+            self.subtitle_lbl.configure(bg="#000000", fg="#FFFFFF")
         if self._summary_lbl is not None:
             self._summary_lbl.configure(bg=p["panel"], fg=p["title"])
 
@@ -462,7 +506,7 @@ class EmotionApp:
 
         for btn in [
             self.btn_camera, self.btn_video, self.btn_image,
-            self.btn_json, self.btn_settings,
+            self.btn_json, self.btn_settings, self.btn_voice,
         ]:
             if btn is not None:
                 btn.configure(
@@ -573,6 +617,13 @@ class EmotionApp:
         )
         mk_browse(r3, self._browse_output).pack(side="left", padx=(6, 0))
 
+        # VOSK model directory
+        r4 = lbl_row("VOSK model directory")
+        mk_entry(r4, self.vosk_model_path).pack(
+            side="left", fill="x", expand=True, ipady=5
+        )
+        mk_browse(r4, self._browse_vosk_model).pack(side="left", padx=(6, 0))
+
         tk.Button(
             dlg, text="Close", command=dlg.destroy,
             bg=p["accent"], fg="#FFFFFF",
@@ -615,6 +666,11 @@ class EmotionApp:
         )
         if path:
             self.output_path.set(path)
+
+    def _browse_vosk_model(self) -> None:
+        path = filedialog.askdirectory(title="Select VOSK model directory")
+        if path:
+            self.vosk_model_path.set(path)
 
     # ── source handlers ───────────────────────────────────────────────────────
 
@@ -696,6 +752,95 @@ class EmotionApp:
     def _on_stop_clicked(self) -> None:
         if self.running:
             self._stop_stream("Stopped by user")
+
+    def _on_voice_toggle(self) -> None:
+        if self.voice_enabled:
+            self._stop_voice_recognition("Voice recognition stopped")
+        else:
+            self._start_voice_recognition()
+
+    def _start_voice_recognition(self) -> None:
+        model_dir = self.vosk_model_path.get().strip()
+        if not model_dir:
+            messagebox.showerror(
+                "Voice error",
+                "Set VOSK model directory in Settings first.",
+            )
+            return
+
+        try:
+            recognizer = VoskMicrophoneRecognizer(model_path=model_dir)
+            recognizer.start(
+                on_partial=self._on_voice_partial,
+                on_final=self._on_voice_final,
+                on_error=self._on_voice_error,
+            )
+        except Exception as exc:
+            messagebox.showerror("Voice error", str(exc))
+            return
+
+        self.voice_recognizer = recognizer
+        self.voice_enabled = True
+        if self.btn_voice is not None:
+            self.btn_voice.configure(text="Voice: On", bg=self._p["btn_active"])
+        self.status_var.set("Voice recognition started")
+
+    def _stop_voice_recognition(self, reason: str = "") -> None:
+        self.voice_enabled = False
+        if self.voice_recognizer is not None:
+            self.voice_recognizer.stop()
+            self.voice_recognizer = None
+        self.partial_subtitle = ""
+        self._update_subtitle_vars()
+        if self.btn_voice is not None:
+            self.btn_voice.configure(text="Voice: Off", bg=self._p["btn"])
+        if reason:
+            self.status_var.set(reason)
+
+    def _on_voice_partial(self, text: str) -> None:
+        self.root.after(0, lambda: self._set_partial_subtitle(text))
+
+    def _on_voice_final(self, text: str) -> None:
+        self.root.after(0, lambda: self._set_final_subtitle(text))
+
+    def _on_voice_error(self, err: str) -> None:
+        self.root.after(0, lambda: self.status_var.set(f"Voice error: {err}"))
+
+    def _set_partial_subtitle(self, text: str) -> None:
+        self.partial_subtitle = text.strip()
+        self._update_subtitle_vars()
+
+    def _set_final_subtitle(self, text: str) -> None:
+        clean = text.strip()
+        if not clean:
+            return
+        self.final_subtitle = clean
+        self.partial_subtitle = ""
+        clipped = self._truncate_text(clean, 160)
+        self.text_var.set(f"Text: {clipped}")
+        self.status_var.set("Voice captured")
+        self._update_subtitle_vars()
+
+    def _build_subtitle_text(self) -> str:
+        if self.partial_subtitle:
+            return self.partial_subtitle
+        if self.final_subtitle:
+            return self.final_subtitle
+        return ""
+
+    def _truncate_text(self, value: str, limit: int) -> str:
+        txt = value.strip()
+        if len(txt) <= limit:
+            return txt
+        return txt[: max(limit - 3, 0)] + "..."
+
+    def _update_subtitle_vars(self) -> None:
+        text = self._build_subtitle_text()
+        clipped = self._truncate_text(text, 120)
+        line = clipped if clipped else "~"
+        self.subtitle_var.set(f"Subtitles: {line}")
+        if self.subtitle_lbl is not None:
+            self.subtitle_lbl.configure(text=self._truncate_text(text, 180))
 
     # ── single image inference ────────────────────────────────────────────────
 
@@ -932,8 +1077,12 @@ class EmotionApp:
             self.face_var.set("Face emotion: NEUTRAL (0.00)")
 
         self.speech_var.set(
-            f"Speech: {self.speech_sentiment}"
-            f" ({self.speech_confidence:.2f})"
+            "Speech: MIC ON (VOSK)"
+            if self.voice_enabled
+            else (
+                f"Speech: {self.speech_sentiment}"
+                f" ({self.speech_confidence:.2f})"
+            )
         )
         tox_lbl = "TOXIC" if self.toxicity_score >= 0.6 else "NEUTRAL"
         self.toxicity_var.set(
@@ -1018,6 +1167,8 @@ class EmotionApp:
     def _on_close(self) -> None:
         if self.running:
             self._stop_stream("Stopped")
+        if self.voice_enabled:
+            self._stop_voice_recognition()
         self.root.destroy()
 
 
