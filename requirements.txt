@@ -18,6 +18,8 @@ facenet-pytorch>=2.5.0
 opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=10.0.0
+vosk>=0.3.45
+sounddevice>=0.4.6
 
 # Utilities
 tqdm>=4.65.0

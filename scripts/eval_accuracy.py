@@ -20,6 +20,16 @@ from tqdm import tqdm
 from src.emotion import create_emotion_model
 
 
+class LabelMapTransform:
+    """Picklable target transform for Windows multiprocessing."""
+
+    def __init__(self, label_map):
+        self.label_map = [int(v) for v in label_map]
+
+    def __call__(self, y):
+        return self.label_map[y]
+
+
 def get_transforms(input_size=112):
     return transforms.Compose([
         transforms.Grayscale(num_output_channels=3),
@@ -50,9 +60,7 @@ def main():
         from src.emotion.trainer import get_fer2013_transforms
         class_names = sorted(p.name for p in test_path.iterdir() if p.is_dir())
         label_map = [FER2013_ORDER.index(c) for c in class_names]
-
-        def target_transform(y):
-            return label_map[y]
+        target_transform = LabelMapTransform(label_map)
 
         ds = ImageFolder(
             test_path,

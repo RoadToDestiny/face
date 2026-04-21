@@ -10,7 +10,9 @@ venv/
 
 # Data & Models
 data/
-
+*.pt
+vosk-model*/
+models/vosk-model*/
 # IDE
 .idea/
 .vscode/

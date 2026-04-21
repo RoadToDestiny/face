@@ -23,9 +23,19 @@ from src.emotion.trainer import train_epoch, get_fer2013_transforms
 FER2013_ORDER = ["anger", "disgust", "fear", "happy", "sad", "surprise", "neutral"]
 
 
+class LabelMapTransform:
+    """Picklable target transform for Windows multiprocessing."""
+
+    def __init__(self, label_map):
+        self.label_map = [int(v) for v in label_map]
+
+    def __call__(self, y):
+        return self.label_map[y]
+
+
 def _build_label_map(class_names):
     """Map ImageFolder (alphabetical) indices to FER2013 indices."""
-    return torch.tensor([FER2013_ORDER.index(c) for c in sorted(class_names)])
+    return [FER2013_ORDER.index(c) for c in sorted(class_names)]
 
 
 def train(
@@ -45,9 +55,7 @@ def train(
     train_path = Path(data_dir) / "train"
     class_names = sorted(p.name for p in train_path.iterdir() if p.is_dir())
     label_map = _build_label_map(class_names)
-
-    def target_transform(y):
-        return label_map[y].item()
+    target_transform = LabelMapTransform(label_map)
 
     train_ds = ImageFolder(
         train_path,
