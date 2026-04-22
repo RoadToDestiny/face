@@ -1,12 +1,5 @@
 # Emotion Recognition Pipeline
 # Python 3.9+
-
-
-
-# эщкерре
-
-
-
 # Core Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
@@ -20,6 +13,7 @@ numpy>=1.24.0
 Pillow>=10.0.0
 vosk>=0.3.45
 sounddevice>=0.4.6
+PyQt6>=6.7.0
 
 # Utilities
 tqdm>=4.65.0
