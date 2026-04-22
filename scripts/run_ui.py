@@ -169,21 +169,34 @@ class EmotionApp:
 
     def _default_vosk_model(self) -> str:
         root = Path(__file__).resolve().parent.parent
-        candidates = [
-            root / "vosk-model-small-ru-0.22",
-            root / "vosk-model-ru-0.42",
-            root / "vosk-model-small-en-us-0.15",
-            root / "models" / "vosk-model-small-ru-0.22",
-            root / "models" / "vosk-model-ru-0.42",
-            root / "models" / "vosk-model-small-en-us-0.15",
-        ]
+        search_roots = [root, root / "models", root / "voskmodel"]
+        candidates = []
+        for base in search_roots:
+            candidates.extend(
+                [
+                    base / "vosk-model-small-ru-0.22",
+                    base / "vosk-model-ru-0.42",
+                    base / "vosk-model-small-en-us-0.15",
+                ]
+            )
+
         for path in candidates:
-            if path.exists() and path.is_dir():
+            if self._is_valid_vosk_model_dir(path):
                 return str(path)
-        for path in list(root.glob("vosk-model*")) + list((root / "models").glob("vosk-model*")):
-            if path.exists() and path.is_dir():
-                return str(path)
+
+        for base in search_roots:
+            if not base.exists() or not base.is_dir():
+                continue
+            for path in base.glob("vosk-model*"):
+                if self._is_valid_vosk_model_dir(path):
+                    return str(path)
         return ""
+
+    def _is_valid_vosk_model_dir(self, path: Path) -> bool:
+        if not path.exists() or not path.is_dir():
+            return False
+        required = ["am", "conf", "graph"]
+        return all((path / entry).exists() for entry in required)
 
     # ── UI build ──────────────────────────────────────────────────────────────
 
@@ -761,6 +774,13 @@ class EmotionApp:
 
     def _start_voice_recognition(self) -> None:
         model_dir = self.vosk_model_path.get().strip()
+        model_path = Path(model_dir) if model_dir else None
+        if model_path is None or not self._is_valid_vosk_model_dir(model_path):
+            auto_model = self._default_vosk_model()
+            if auto_model:
+                self.vosk_model_path.set(auto_model)
+                model_dir = auto_model
+
         if not model_dir:
             messagebox.showerror(
                 "Voice error",
