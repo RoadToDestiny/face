@@ -1,1202 +1,1182 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# flake8: noqa
-"""Emotion AI – merged dashboard UI.
-
-Visual style: dashboard (dark panel, overlay, right summary + timeline).
-Functionality: image / video / webcam, model path, camera index,
-output video, JSON speech data, light/dark theme toggle.
-"""
-
 from __future__ import annotations
 
-import json
-import queue
 import sys
 import threading
-import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Union, cast
+from typing import Optional
 
 import cv2
-import tkinter as tk
-from PIL import Image, ImageTk
-from tkinter import filedialog, messagebox, ttk
+import numpy as np
+from PyQt6.QtCore import QPoint, QRect, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPixmap
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSpacerItem,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.audio.speech_to_text import VoskMicrophoneRecognizer
+from src.pipeline import EmotionPipeline
 
-# ── Palettes ──────────────────────────────────────────────────────────────────
 
-DARK: dict[str, str] = {
-    "bg":         "#0D1B2A",
-    "panel":      "#142338",
-    "video":      "#08141F",
-    "border":     "#1F3A56",
-    "text":       "#E6F2FF",
-    "muted":      "#98B8D6",
-    "accent":     "#1D9BF0",
-    "title":      "#6EC6FF",
-    "btn":        "#1B3048",
-    "btn_hover":  "#264667",
-    "btn_active": "#2F5E8E",
-    "danger":     "#8A2A3A",
-    "danger_h":   "#A2374A",
-    "overlay":    "#0F3C63",
-    "entry_bg":   "#112337",
-    "entry_fg":   "#E8ECF4",
-    "tree_bg":    "#102034",
-    "tree_fg":    "#D5E9FF",
-    "tree_head":  "#1B3551",
-    "tree_sel":   "#24507A",
-}
-
-LIGHT: dict[str, str] = {
-    "bg":         "#EAF4FF",
-    "panel":      "#FFFFFF",
-    "video":      "#DCEEFF",
-    "border":     "#B9D4EE",
-    "text":       "#0D2740",
-    "muted":      "#4F7194",
-    "accent":     "#1D9BF0",
-    "title":      "#0E5E9C",
-    "btn":        "#E4F0FB",
-    "btn_hover":  "#D4E7F8",
-    "btn_active": "#B8D8F5",
-    "danger":     "#DC2626",
-    "danger_h":   "#B91C1C",
-    "overlay":    "#1A5A89",
-    "entry_bg":   "#FFFFFF",
-    "entry_fg":   "#1A202C",
-    "tree_bg":    "#F3F9FF",
-    "tree_fg":    "#17324A",
-    "tree_head":  "#DCEEFF",
-    "tree_sel":   "#C8E2FA",
+EMOTION_COLORS = {
+    "NEUTRAL": "#E5E7EB",
+    "NO FACE": "#AEB7C4",
+    "HAPPY": "#86EFAC",
+    "SAD": "#93C5FD",
+    "ANGRY": "#F87171",
+    "SURPRISE": "#FCD34D",
+    "FEAR": "#C4B5FD",
+    "DISGUST": "#A3E635",
 }
 
 
-class EmotionApp:
-    """Dashboard UI: visual from dashboard sketch + full source/model controls."""
+@dataclass
+class AnalyzerState:
+    emotion: str = "NEUTRAL"
+    face_confidence: float = 0.0
+    voice_confidence: float = 0.0
+    subtitle: str = "Ready"
+    camera_enabled: bool = True
+    mic_enabled: bool = True
+    camera_index: int = 0
+    mic_device: Optional[int] = None
+    show_subtitles: bool = True
 
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Emotion AI Live Analyzer")
-        self.root.geometry("1280x780")
-        self.root.minsize(1100, 700)
 
-        # theme state
-        self._dark = True
-        self._p: dict[str, str] = DARK.copy()
+class GlassPanel(QFrame):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("GlassPanel")
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(42)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(0, 0, 0, 140))
+        self.setGraphicsEffect(shadow)
 
-        # variables
-        self.source_type  = tk.StringVar(value="webcam")
-        self.input_path   = tk.StringVar(value="")
-        self.model_path   = tk.StringVar(value=self._default_model())
-        self.vosk_model_path = tk.StringVar(value=self._default_vosk_model())
-        self.output_path  = tk.StringVar(value="")
-        self.camera_idx   = tk.IntVar(value=0)
 
-        self.status_var        = tk.StringVar(value="Ready")
-        self.summary_title_var = tk.StringVar(value="Final emotion: NEUTRAL")
-        self.source_var        = tk.StringVar(value="Source: camera")
-        self.face_var          = tk.StringVar(value="Face emotion: NEUTRAL (0.00)")
-        self.speech_var        = tk.StringVar(value="Speech: NEUTRAL (0.93)")
-        self.toxicity_var      = tk.StringVar(value="Toxicity: NEUTRAL (0.0)")
-        self.text_var          = tk.StringVar(value="Text: ~")
-        self.subtitle_var      = tk.StringVar(value="Subtitles: ~")
+class ConfidenceBar(QWidget):
+    def __init__(self, title: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._value = 0.0
+        self._accent = QColor("#60A5FA")
+        self.setFixedHeight(44)
 
-        # internal
-        self.speech_sentiment  = "NEUTRAL"
-        self.speech_confidence = 0.93
-        self.toxicity_score    = 0.0
-        self.overlay_face      = "NEUTRAL"
-        self.voice_enabled     = False
-        self.voice_recognizer: Optional[VoskMicrophoneRecognizer] = None
-        self.final_subtitle    = ""
-        self.partial_subtitle  = ""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(7)
 
-        self.pipeline: Optional[Any]           = None
-        self.cap:      Optional[cv2.VideoCapture] = None
-        self.writer:   Optional[cv2.VideoWriter]  = None
-        self.running   = False
-        self.photo:    Optional[ImageTk.PhotoImage] = None
-        self._frame_q: queue.Queue = queue.Queue(maxsize=2)
-        self._infer_thread: Optional[threading.Thread] = None
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("MetricLabel")
+        self.value_label = QLabel("0%")
+        self.value_label.setObjectName("MetricValue")
+        row.addWidget(self.title_label)
+        row.addStretch(1)
+        row.addWidget(self.value_label)
+        layout.addLayout(row)
 
-        # widget refs
-        self.preview_lbl:    Optional[tk.Label]     = None
-        self.overlay_lbl:    Optional[tk.Label]     = None
-        self.frame_time_lbl: Optional[tk.Label]     = None
-        self.timeline:       Optional[ttk.Treeview] = None
-        self.btn_camera:     Optional[tk.Button]    = None
-        self.btn_video:      Optional[tk.Button]    = None
-        self.btn_image:      Optional[tk.Button]    = None
-        self.btn_json:       Optional[tk.Button]    = None
-        self.btn_voice:      Optional[tk.Button]    = None
-        self.btn_stop:       Optional[tk.Button]    = None
-        self.btn_settings:   Optional[tk.Button]    = None
-        self.btn_theme:      Optional[tk.Button]    = None
-        self._summary_lbl:   Optional[tk.Label]     = None
-        self.subtitle_lbl:   Optional[tk.Label]     = None
+        self.track = QFrame()
+        self.track.setObjectName("ConfidenceTrack")
+        self.track.setFixedHeight(6)
+        self.fill = QFrame(self.track)
+        self.fill.setObjectName("ConfidenceFill")
+        self.fill.setGeometry(0, 0, 0, 6)
+        layout.addWidget(self.track)
 
-        # theme registries
-        self._r_bg:    list[Any] = []
-        self._r_panel: list[Any] = []
-        self._r_text:  list[Any] = []
-        self._r_muted: list[Any] = []
-        self._r_entry: list[tk.Entry]  = []
+    def setValue(self, value: float) -> None:
+        self._value = max(0.0, min(1.0, float(value)))
+        self.value_label.setText(f"{int(self._value * 100)}%")
+        width = max(0, int(self.track.width() * self._value))
+        self.fill.setGeometry(0, 0, width, self.track.height())
+        self.fill.setStyleSheet(
+            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(255,255,255,0.90), stop:1 {self._accent.name()}); border-radius: 3px;"
+        )
 
-        self._row_id = 0
+    def setAccent(self, color: QColor) -> None:
+        self._accent = QColor(color)
+        self.setValue(self._value)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.setValue(self._value)
+
+
+class RoundButton(QPushButton):
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setFixedSize(52, 52)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+
+class WindowButton(QPushButton):
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self.setFixedSize(30, 30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+
+class SettingsDialog(QDialog):
+    def __init__(
+        self,
+        camera_items: list[tuple[str, int]],
+        microphone_items: list[tuple[str, Optional[int]]],
+        current_camera: int,
+        current_microphone: Optional[int],
+        show_subtitles: bool,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setModal(True)
+        self.setObjectName("SettingsDialog")
+        self.setMinimumWidth(460)
+
+        self.camera_combo = QComboBox(self)
+        self.microphone_combo = QComboBox(self)
+        self.subtitle_checkbox = QCheckBox("Show subtitles", self)
+        self.subtitle_checkbox.setChecked(show_subtitles)
+
+        for label, value in camera_items:
+            self.camera_combo.addItem(label, value)
+        for label, value in microphone_items:
+            self.microphone_combo.addItem(label, value)
+
+        self._select_value(self.camera_combo, current_camera)
+        self._select_value(self.microphone_combo, current_microphone)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        header = QLabel("Device and subtitle settings", self)
+        header.setObjectName("SettingsHeader")
+        layout.addWidget(header)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(12)
+        form.addRow("Camera", self.camera_combo)
+        form.addRow("Microphone", self.microphone_combo)
+        layout.addLayout(form)
+
+        layout.addWidget(self.subtitle_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _select_value(self, combo: QComboBox, value: Optional[int]) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) == value:
+                combo.setCurrentIndex(index)
+                return
+
+    def selected_camera(self) -> int:
+        return int(self.camera_combo.currentData())
+
+    def selected_microphone(self) -> Optional[int]:
+        data = self.microphone_combo.currentData()
+        return None if data is None else int(data)
+
+    def subtitles_enabled(self) -> bool:
+        return self.subtitle_checkbox.isChecked()
+
+
+class BottomControls(GlassPanel):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("BottomControls")
+        self.setFixedSize(92, 304)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        self.camera_button = RoundButton("📷")
+        self.mic_button = RoundButton("🎤")
+        self.video_button = RoundButton("🎬")
+        self.settings_button = RoundButton("⚙")
+        self.camera_button.setCheckable(True)
+        self.mic_button.setCheckable(True)
+        self.video_button.setCheckable(False)
+        self.settings_button.setCheckable(False)
+        self.camera_button.setChecked(True)
+        self.mic_button.setChecked(True)
+
+        layout.addStretch(1)
+        layout.addWidget(self.camera_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.mic_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.video_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.settings_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+
+        self._refresh_button_style()
+
+    def _refresh_button_style(self) -> None:
+        self.camera_button.setProperty("active", self.camera_button.isChecked())
+        self.mic_button.setProperty("active", self.mic_button.isChecked())
+        self.settings_button.setProperty("active", self.settings_button.isChecked())
+        for button in (self.camera_button, self.mic_button, self.video_button, self.settings_button):
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+
+
+class PlayerControls(GlassPanel):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("PlayerControls")
+        self.setFixedSize(180, 72)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
+
+        self.play_pause_button = RoundButton("⏸")
+        self.restart_button = RoundButton("↺")
+        self.play_pause_button.setFixedSize(50, 50)
+        self.restart_button.setFixedSize(50, 50)
+
+        layout.addWidget(self.play_pause_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.restart_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+
+class EmotionAILiveAnalyzer(QMainWindow):
+    voice_partial = pyqtSignal(str)
+    voice_final = pyqtSignal(str)
+    voice_error = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Emotion AI Live Analyzer")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setMinimumSize(1180, 760)
+        self.setMouseTracking(True)
+
+        self.state = AnalyzerState()
+        self._drag_offset: Optional[QPoint] = None
+        self._current_frame: Optional[np.ndarray] = None
+        self._camera: Optional[cv2.VideoCapture] = None
+        self._pipeline: Optional[EmotionPipeline] = None
+        self._voice_recognizer: Optional[VoskMicrophoneRecognizer] = None
+        self._voice_model_path = self._default_vosk_model_path()
+        self._analysis_loading = False
+        self._source_mode = "camera"
+        self._video_path: Optional[str] = None
+        self._video_paused = False
+        self._video_ended = False
+        self._last_frame: Optional[np.ndarray] = None
+        self._cached_results: list[dict] = []
+        self._video_frame_index = 0
+        self._video_analyze_every_n = 2
+        self._camera_timer_interval_ms = 33
+        self._video_timer_interval_ms = 33
+        self._analysis_busy = False
+        self._analysis_lock = threading.Lock()
+        self._analysis_exception: Optional[str] = None
+        self._camera_items_cache: list[tuple[str, int]] = [("Camera 0", 0), ("Camera 1", 1), ("Camera 2", 2), ("Camera 3", 3)]
+        self._microphone_items_cache: list[tuple[str, Optional[int]]] = [("Default microphone", None)]
+        self._subtitle_timeout_ms = 2600
 
         self._build_ui()
-        self._apply_theme()
-        self._set_mode_button_state()
-        self._refresh_overlay()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._apply_styles()
+        self._connect_signals()
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+        self._capture_timer = QTimer(self)
+        self._capture_timer.setInterval(self._camera_timer_interval_ms)
+        self._capture_timer.timeout.connect(self._grab_frame)
 
-    def _default_model(self) -> str:
-        root = Path(__file__).resolve().parent.parent
-        raf = root / "checkpoints_rafdb" / "best_emotion_model.pt"
-        fer = root / "checkpoints" / "best_emotion_model.pt"
-        if raf.exists():
-            return str(raf)
-        if fer.exists():
-            return str(fer)
-        return ""
+        self._subtitle_hide_timer = QTimer(self)
+        self._subtitle_hide_timer.setSingleShot(True)
+        self._subtitle_hide_timer.setInterval(self._subtitle_timeout_ms)
+        self._subtitle_hide_timer.timeout.connect(self._hide_subtitle_panel)
 
-    def _default_vosk_model(self) -> str:
-        root = Path(__file__).resolve().parent.parent
-        search_roots = [root, root / "models", root / "voskmodel"]
-        candidates = []
-        for base in search_roots:
-            candidates.extend(
-                [
-                    base / "vosk-model-small-ru-0.22",
-                    base / "vosk-model-ru-0.42",
-                    base / "vosk-model-small-en-us-0.15",
-                ]
-            )
-
-        for path in candidates:
-            if self._is_valid_vosk_model_dir(path):
-                return str(path)
-
-        for base in search_roots:
-            if not base.exists() or not base.is_dir():
-                continue
-            for path in base.glob("vosk-model*"):
-                if self._is_valid_vosk_model_dir(path):
-                    return str(path)
-        return ""
-
-    def _is_valid_vosk_model_dir(self, path: Path) -> bool:
-        if not path.exists() or not path.is_dir():
-            return False
-        required = ["am", "conf", "graph"]
-        return all((path / entry).exists() for entry in required)
-
-    # ── UI build ──────────────────────────────────────────────────────────────
+        self.set_emotion_state("NEUTRAL", 0.0, 0.0)
+        self.set_subtitle("Ready")
+        self._apply_layout()
+        QTimer.singleShot(0, self._begin_runtime)
 
     def _build_ui(self) -> None:
-        p = self._p
+        self.central = QWidget(self)
+        self.central.setObjectName("CentralRoot")
+        self.central.setMouseTracking(True)
+        self.setCentralWidget(self.central)
 
-        self._accent_strip = tk.Frame(self.root, bg=p["accent"], height=4)
-        self._accent_strip.pack(fill="x")
+        self.title_bar = GlassPanel(self.central)
+        self.title_bar.setObjectName("TitleBar")
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(14, 6, 12, 6)
+        title_layout.setSpacing(8)
 
-        self._topbar = tk.Frame(self.root, bg=p["panel"], height=48)
-        self._topbar.pack(fill="x")
-        self._topbar.pack_propagate(False)
-        self._r_panel.append(self._topbar)
+        self.app_title = QLabel("Emotion AI Live Analyzer")
+        self.app_title.setObjectName("TitleLabel")
+        self.status_chip = QLabel("Ready")
+        self.status_chip.setObjectName("StatusChip")
 
-        title_lbl = tk.Label(
-            self._topbar,
-            text="Emotion AI Live Analyzer",
-            bg=p["panel"], fg=p["muted"],
-            font=("Segoe UI", 10, "bold"),
-        )
-        title_lbl.pack(side="left", padx=(12, 20))
-        self._r_panel.append(title_lbl)
-        self._r_muted.append(title_lbl)
+        title_layout.addWidget(self.app_title)
+        title_layout.addStretch(1)
+        title_layout.addWidget(self.status_chip)
 
-        # left source controls
-        src_grp = tk.Frame(self._topbar, bg=p["panel"])
-        src_grp.pack(side="left", fill="y", pady=8)
-        self._r_panel.append(src_grp)
+        self.min_button = WindowButton("–")
+        self.max_button = WindowButton("⛶")
+        self.close_button = WindowButton("×")
+        self.min_button.setObjectName("MinButton")
+        self.max_button.setObjectName("MaxButton")
+        self.close_button.setObjectName("CloseButton")
+        self.min_button.clicked.connect(self.showMinimized)
+        self.max_button.clicked.connect(self.toggle_fullscreen)
+        self.close_button.clicked.connect(self.close)
+        title_layout.addWidget(self.min_button)
+        title_layout.addWidget(self.max_button)
+        title_layout.addWidget(self.close_button)
 
-        self.btn_camera = self._mkbtn(
-            src_grp, "Camera", self._on_camera_clicked, 14)
-        self.btn_camera.pack(side="left", padx=4)
+        self.background = QLabel(self.central)
+        self.background.setObjectName("VideoBackground")
+        self.background.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.background.setMouseTracking(True)
 
-        self.btn_video = self._mkbtn(
-            src_grp, "Load Video", self._on_video_clicked, 16)
-        self.btn_video.pack(side="left", padx=4)
+        self.left_panel = GlassPanel(self.central)
+        self.left_panel.setObjectName("LeftPanel")
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(24, 24, 24, 24)
+        left_layout.setSpacing(18)
 
-        self.btn_image = self._mkbtn(
-            src_grp, "Open Image", self._on_image_clicked, 16)
-        self.btn_image.pack(side="left", padx=4)
+        self.panel_title = QLabel("FINAL EMOTION")
+        self.panel_title.setObjectName("PanelHeader")
+        self.final_emotion_label = QLabel("NEUTRAL")
+        self.final_emotion_label.setObjectName("FinalEmotion")
+        self.final_emotion_label.setWordWrap(True)
 
-        self.btn_json = self._mkbtn(
-            src_grp, "Open JSON", self._on_open_json, 14)
-        self.btn_json.pack(side="left", padx=4)
+        self.face_bar = ConfidenceBar("Face Confidence")
+        self.voice_bar = ConfidenceBar("Voice Confidence")
 
-        self.btn_voice = self._mkbtn(
-            src_grp, "Voice: Off", self._on_voice_toggle, 14)
-        self.btn_voice.pack(side="left", padx=4)
+        left_layout.addWidget(self.panel_title)
+        left_layout.addWidget(self.final_emotion_label)
+        left_layout.addSpacing(10)
+        left_layout.addWidget(self.face_bar)
+        left_layout.addWidget(self.voice_bar)
+        left_layout.addStretch(1)
 
-        self.btn_stop = self._mkbtn(
-            src_grp, "Stop", self._on_stop_clicked, 10,
-            bg=p["danger"], hover=p["danger_h"])
-        self.btn_stop.pack(side="left", padx=(4, 0))
+        self.subtitle = QLabel("Ready", self.central)
+        self.subtitle.setObjectName("SubtitleLabel")
+        self.subtitle.setWordWrap(True)
+        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.subtitle_panel = GlassPanel(self.central)
+        self.subtitle_panel.setObjectName("SubtitlePanel")
+        subtitle_layout = QVBoxLayout(self.subtitle_panel)
+        subtitle_layout.setContentsMargins(18, 12, 18, 12)
+        subtitle_layout.addWidget(self.subtitle)
+        subtitle_shadow = QGraphicsDropShadowEffect(self.subtitle_panel)
+        subtitle_shadow.setBlurRadius(16)
+        subtitle_shadow.setOffset(0, 3)
+        subtitle_shadow.setColor(QColor(0, 0, 0, 180))
+        self.subtitle_panel.setGraphicsEffect(subtitle_shadow)
 
-        # right controls
-        rgt_grp = tk.Frame(self._topbar, bg=p["panel"])
-        rgt_grp.pack(side="right", fill="y", pady=8, padx=8)
-        self._r_panel.append(rgt_grp)
+        self.bottom_controls = BottomControls(self.central)
+        self.bottom_controls.camera_button.clicked.connect(self.toggle_camera)
+        self.bottom_controls.mic_button.clicked.connect(self.toggle_mic)
+        self.bottom_controls.video_button.clicked.connect(self.load_video)
+        self.bottom_controls.settings_button.clicked.connect(self.open_settings)
 
-        self.btn_settings = self._mkbtn(
-            rgt_grp, "Settings", self._open_settings, 14)
-        self.btn_settings.pack(side="left", padx=4)
+        self.player_controls = PlayerControls(self.central)
+        self.player_controls.play_pause_button.clicked.connect(self.toggle_video_play_pause)
+        self.player_controls.restart_button.clicked.connect(self.restart_video)
+        self.player_controls.setVisible(False)
 
-        self.btn_theme = self._mkbtn(
-            rgt_grp, "Light", self._toggle_theme, 12)
-        self.btn_theme.pack(side="left", padx=4)
-
-        self._sep_line = tk.Frame(self.root, bg=p["border"], height=1)
-        self._sep_line.pack(fill="x")
-
-        self._content = tk.Frame(self.root, bg=p["bg"])
-        self._content.pack(fill="both", expand=True)
-        self._r_bg.append(self._content)
-
-        left = tk.Frame(self._content, bg=p["bg"])
-        left.pack(side="left", fill="both", expand=True)
-        self._r_bg.append(left)
-
-        right = tk.Frame(self._content, bg=p["panel"], width=420)
-        right.pack(side="right", fill="both")
-        right.pack_propagate(False)
-        self._r_panel.append(right)
-
-        self._build_video_panel(left)
-        self._build_right_panel(right)
-
-    def _mkbtn(
-        self,
-        parent: tk.Widget,
-        text: str,
-        command: Any,
-        width: int,
-        bg: Optional[str] = None,
-        hover: Optional[str] = None,
-    ) -> tk.Button:
-        p = self._p
-        base = bg or p["btn"]
-        over = hover or p["btn_hover"]
-        return tk.Button(
-            parent,
-            text=text,
-            command=command,
-            width=width,
-            font=("Segoe UI", 9),
-            bg=base, fg=p["text"],
-            relief="flat", bd=0,
-            padx=6, pady=4,
-            activebackground=over,
-            activeforeground=p["text"],
-            cursor="hand2",
-        )
-
-    # ── video panel ───────────────────────────────────────────────────────────
-
-    def _build_video_panel(self, parent: tk.Widget) -> None:
-        p = self._p
-
-        self._video_shell = tk.Frame(
-            parent, bg=p["video"],
-            highlightthickness=1,
-            highlightbackground=p["border"],
-        )
-        self._video_shell.pack(
-            fill="both", expand=True, padx=(8, 4), pady=8
-        )
-
-        self.preview_lbl = tk.Label(
-            self._video_shell,
-            bg=p["video"], fg=p["muted"],
-            text="Waiting for stream",
-            font=("Segoe UI", 14),
-        )
-        self.preview_lbl.pack(fill="both", expand=True)
-
-        self.overlay_lbl = tk.Label(
-            self._video_shell,
-            bg=p["overlay"], fg="#FFFFFF",
-            font=("Segoe UI", 22, "bold"),
-            padx=16, pady=8, anchor="w",
-        )
-        self.overlay_lbl.place(x=16, y=16)
-
-        self.subtitle_lbl = tk.Label(
-            self._video_shell,
-            bg="#000000", fg="#FFFFFF",
-            font=("Segoe UI", 11, "bold"),
-            padx=10, pady=6, anchor="w",
-            justify="left",
-            text="",
-        )
-        self.subtitle_lbl.place(relx=0.03, rely=0.92, relwidth=0.94, anchor="w")
-
-        self._footer = tk.Frame(parent, bg=p["panel"], height=28)
-        self._footer.pack(fill="x", padx=(8, 4), pady=(0, 8))
-        self._footer.pack_propagate(False)
-        self._r_panel.append(self._footer)
-
-        self.frame_time_lbl = tk.Label(
-            self._footer,
-            text="Last frame: -- ms",
-            bg=p["panel"], fg=p["muted"],
-            font=("Segoe UI", 9), anchor="w",
-        )
-        self.frame_time_lbl.pack(fill="x", padx=8)
-        self._r_panel.append(self.frame_time_lbl)
-        self._r_muted.append(self.frame_time_lbl)
-
-    # ── right panel ───────────────────────────────────────────────────────────
-
-    def _build_right_panel(self, parent: tk.Widget) -> None:
-        p = self._p
-
-        top = tk.Frame(parent, bg=p["panel"])
-        top.pack(fill="x")
-        self._r_panel.append(top)
-
-        self._summary_lbl = tk.Label(
-            top,
-            textvariable=self.summary_title_var,
-            bg=p["panel"], fg=p["title"],
-            font=("Segoe UI", 18, "bold"),
-            anchor="w", pady=10,
-        )
-        self._summary_lbl.pack(fill="x", padx=10)
-        self._r_panel.append(self._summary_lbl)
-
-        for var in [
-            self.source_var, self.face_var,
-            self.speech_var, self.toxicity_var, self.text_var, self.subtitle_var,
-        ]:
-            lbl = tk.Label(
-                top,
-                textvariable=var,
-                bg=p["panel"], fg=p["text"],
-                anchor="w", justify="left",
-                font=("Segoe UI", 10),
-            )
-            lbl.pack(fill="x", padx=10)
-            self._r_panel.append(lbl)
-            self._r_text.append(lbl)
-
-        status_lbl = tk.Label(
-            top,
-            textvariable=self.status_var,
-            bg=p["panel"], fg=p["muted"],
-            anchor="w", font=("Segoe UI", 9), pady=4,
-        )
-        status_lbl.pack(fill="x", padx=10)
-        self._r_panel.append(status_lbl)
-        self._r_muted.append(status_lbl)
-
-        self._table_sep = tk.Frame(parent, bg=p["accent"], height=1)
-        self._table_sep.pack(fill="x")
-
-        tbl_wrap = tk.Frame(parent, bg=p["panel"])
-        tbl_wrap.pack(fill="both", expand=True)
-        self._r_panel.append(tbl_wrap)
-
-        self._configure_tree_style()
-        cols = ("t", "face", "speech", "final")
-        self.timeline = ttk.Treeview(
-            tbl_wrap, columns=cols,
-            show="headings", style="Dashboard.Treeview",
-        )
-        for col, heading, w in [
-            ("t",      "t, ms",  82),
-            ("face",   "Face",   95),
-            ("speech", "Speech", 95),
-            ("final",  "Final", 100),
-        ]:
-            self.timeline.heading(col, text=heading)
-            self.timeline.column(
-                col, width=w, minwidth=w - 15, anchor="center"
-            )
-
-        scroll = ttk.Scrollbar(
-            tbl_wrap, orient="vertical",
-            command=self.timeline.yview,
-        )
-        self.timeline.configure(yscrollcommand=scroll.set)
-        self.timeline.pack(
-            side="left", fill="both", expand=True,
-            padx=(5, 0), pady=5,
-        )
-        scroll.pack(side="right", fill="y", pady=5, padx=(0, 5))
-
-    def _configure_tree_style(self) -> None:
-        p = self._p
-        s = ttk.Style(self.root)
-        s.theme_use("default")
-        s.configure(
-            "Dashboard.Treeview",
-            background=p["tree_bg"],
-            foreground=p["tree_fg"],
-            fieldbackground=p["tree_bg"],
-            bordercolor=p["border"],
-            rowheight=22,
-            font=("Segoe UI", 9),
-        )
-        s.configure(
-            "Dashboard.Treeview.Heading",
-            background=p["tree_head"],
-            foreground=p["text"],
-            bordercolor=p["border"],
-            font=("Segoe UI", 9, "bold"),
-        )
-        s.map(
-            "Dashboard.Treeview",
-            background=[("selected", p["tree_sel"])],
+    def _apply_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QWidget#CentralRoot {
+                background-color: #05070b;
+                border: 1px solid rgba(255, 255, 255, 38);
+            }
+            QFrame#TitleBar {
+                background-color: rgba(10, 13, 18, 168);
+                border: 1px solid rgba(255, 255, 255, 24);
+                border-radius: 15px;
+            }
+            QLabel#VideoBackground {
+                background-color: #05070b;
+            }
+            QFrame#GlassPanel, QFrame#BottomControls, QFrame#LeftPanel {
+                background-color: rgba(12, 16, 23, 142);
+                border: 1px solid rgba(255, 255, 255, 26);
+                border-radius: 18px;
+            }
+            QFrame#PlayerControls {
+                background-color: rgba(10, 12, 18, 150);
+                border: 1px solid rgba(255, 255, 255, 22);
+                border-radius: 18px;
+            }
+            QFrame#SubtitlePanel {
+                background-color: rgba(10, 12, 18, 150);
+                border: 1px solid rgba(255, 255, 255, 22);
+                border-radius: 18px;
+            }
+            QLabel#PanelHeader {
+                color: rgba(255, 255, 255, 145);
+                font-size: 14px;
+                letter-spacing: 4px;
+                font-weight: 700;
+            }
+            QLabel#FinalEmotion {
+                color: #E5E7EB;
+                font-size: 44px;
+                font-weight: 800;
+                letter-spacing: 2px;
+            }
+            QLabel#MetricLabel {
+                color: rgba(255, 255, 255, 210);
+                font-size: 14px;
+                font-weight: 600;
+            }
+            QLabel#MetricValue {
+                color: rgba(255, 255, 255, 220);
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QFrame#ConfidenceTrack {
+                background-color: rgba(255, 255, 255, 28);
+                border-radius: 3px;
+            }
+            QLabel#SubtitleLabel {
+                color: #F8FAFC;
+                font-size: 28px;
+                font-weight: 700;
+                background: transparent;
+            }
+            QLabel#TitleLabel {
+                color: rgba(255, 255, 255, 230);
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel#StatusChip {
+                color: rgba(255, 255, 255, 205);
+                background-color: rgba(255, 255, 255, 14);
+                border: 1px solid rgba(255, 255, 255, 22);
+                border-radius: 10px;
+                padding: 5px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton {
+                border: none;
+            }
+            QPushButton#ControlButton {
+                border: none;
+                border-radius: 29px;
+                background-color: rgba(255, 255, 255, 18);
+                color: rgba(255, 255, 255, 242);
+                font-size: 24px;
+                font-weight: 700;
+            }
+            QPushButton#ControlButton:hover {
+                background-color: rgba(255, 255, 255, 30);
+            }
+            QPushButton#ControlButton[active="true"] {
+                background-color: rgba(96, 165, 250, 58);
+            }
+            QPushButton#MinButton, QPushButton#MaxButton, QPushButton#CloseButton {
+                border: 1px solid rgba(255, 255, 255, 18);
+                border-radius: 18px;
+                background-color: rgba(255, 255, 255, 12);
+                color: rgba(255, 255, 255, 230);
+                font-size: 18px;
+                font-weight: 700;
+            }
+            QPushButton#MinButton:hover, QPushButton#MaxButton:hover {
+                background-color: rgba(255, 255, 255, 20);
+            }
+            QPushButton#CloseButton:hover {
+                background-color: rgba(239, 68, 68, 92);
+                border-color: rgba(239, 68, 68, 120);
+            }
+            QDialog#SettingsDialog {
+                background-color: rgba(9, 12, 17, 245);
+                color: #F8FAFC;
+            }
+            QLabel#SettingsHeader {
+                color: rgba(255, 255, 255, 220);
+                font-size: 18px;
+                font-weight: 700;
+                padding-bottom: 4px;
+            }
+            QComboBox, QCheckBox {
+                color: #F8FAFC;
+                font-size: 13px;
+            }
+            QComboBox {
+                background-color: rgba(255, 255, 255, 10);
+                border: 1px solid rgba(255, 255, 255, 20);
+                border-radius: 12px;
+                padding: 7px 10px;
+                min-height: 28px;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 26px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #10151d;
+                color: #F8FAFC;
+                selection-background-color: rgba(96, 165, 250, 120);
+                border: 1px solid rgba(255, 255, 255, 18);
+            }
+            QCheckBox {
+                spacing: 10px;
+                padding: 4px 2px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 5px;
+                border: 1px solid rgba(255, 255, 255, 28);
+                background: rgba(255, 255, 255, 8);
+            }
+            QCheckBox::indicator:checked {
+                background: rgba(96, 165, 250, 210);
+                border-color: rgba(96, 165, 250, 240);
+            }
+            QDialogButtonBox QPushButton {
+                border: 1px solid rgba(255, 255, 255, 18);
+                border-radius: 14px;
+                background-color: rgba(255, 255, 255, 12);
+                color: rgba(255, 255, 255, 230);
+                min-width: 86px;
+                min-height: 34px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 6px 14px;
+            }
+            QDialogButtonBox QPushButton:hover {
+                background-color: rgba(255, 255, 255, 20);
+            }
+            QDialogButtonBox QPushButton:pressed {
+                background-color: rgba(255, 255, 255, 28);
+            }
+            """
         )
 
-    # ── theme ─────────────────────────────────────────────────────────────────
+        for button in (
+            self.bottom_controls.camera_button,
+            self.bottom_controls.mic_button,
+            self.bottom_controls.video_button,
+            self.bottom_controls.settings_button,
+            self.player_controls.play_pause_button,
+            self.player_controls.restart_button,
+        ):
+            button.setObjectName("ControlButton")
 
-    def _toggle_theme(self) -> None:
-        self._dark = not self._dark
-        self._p = DARK.copy() if self._dark else LIGHT.copy()
-        self._apply_theme()
+    def _connect_signals(self) -> None:
+        self.voice_partial.connect(self._on_voice_partial)
+        self.voice_final.connect(self._on_voice_final)
+        self.voice_error.connect(self._on_voice_error)
 
-    def _apply_theme(self) -> None:
-        p = self._p
-        self.root.configure(bg=p["bg"])
-
-        self._accent_strip.configure(bg=p["accent"])
-        self._sep_line.configure(bg=p["border"])
-        self._table_sep.configure(bg=p["accent"])
-        self._video_shell.configure(
-            bg=p["video"], highlightbackground=p["border"]
-        )
-        if self.preview_lbl is not None:
-            self.preview_lbl.configure(bg=p["video"], fg=p["muted"])
-        if self.overlay_lbl is not None:
-            self.overlay_lbl.configure(bg=p["overlay"])
-        if self.subtitle_lbl is not None:
-            self.subtitle_lbl.configure(bg="#000000", fg="#FFFFFF")
-        if self._summary_lbl is not None:
-            self._summary_lbl.configure(bg=p["panel"], fg=p["title"])
-
-        for w in self._r_bg:
-            cast(Any, w).configure(bg=p["bg"])
-        for w in self._r_panel:
-            cast(Any, w).configure(bg=p["panel"])
-        for w in self._r_text:
-            cast(Any, w).configure(fg=p["text"])
-        for w in self._r_muted:
-            cast(Any, w).configure(fg=p["muted"])
-        for e in self._r_entry:
-            e.configure(
-                bg=p["entry_bg"], fg=p["entry_fg"],
-                insertbackground=p["entry_fg"],
-                highlightbackground=p["border"],
-            )
-
-        if self.btn_theme is not None:
-            lbl = "Dark" if not self._dark else "Light"
-            self.btn_theme.configure(
-                text=lbl, bg=p["btn"], fg=p["text"],
-                activebackground=p["btn_hover"],
-                activeforeground=p["text"],
-            )
-
-        for btn in [
-            self.btn_camera, self.btn_video, self.btn_image,
-            self.btn_json, self.btn_settings, self.btn_voice,
-        ]:
-            if btn is not None:
-                btn.configure(
-                    bg=p["btn"], fg=p["text"],
-                    activebackground=p["btn_hover"],
-                    activeforeground=p["text"],
-                )
-        if self.btn_stop is not None:
-            self.btn_stop.configure(
-                bg=p["danger"], fg=p["text"],
-                activebackground=p["danger_h"],
-                activeforeground=p["text"],
-            )
-
-        self._configure_tree_style()
-        self._set_mode_button_state()
-
-    # ── source highlight ──────────────────────────────────────────────────────
-
-    def _set_mode_button_state(self) -> None:
-        p = self._p
-        active = self.source_type.get()
-        mapping = {
-            "webcam": self.btn_camera,
-            "video":  self.btn_video,
-            "image":  self.btn_image,
-        }
-        for key, btn in mapping.items():
-            if btn is None:
-                continue
-            btn.configure(
-                bg=p["btn_active"] if key == active else p["btn"]
-            )
-
-    # ── settings dialog ───────────────────────────────────────────────────────
-
-    def _open_settings(self) -> None:
-        p = self._p
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Settings")
-        dlg.configure(bg=p["panel"])
-        dlg.resizable(False, False)
-        dlg.grab_set()
-
-        def lbl_row(text: str) -> tk.Frame:
-            tk.Label(
-                dlg, text=text,
-                bg=p["panel"], fg=p["muted"],
-                font=("Segoe UI", 9, "bold"), anchor="w",
-            ).pack(fill="x", padx=18, pady=(12, 2))
-            f = tk.Frame(dlg, bg=p["panel"])
-            f.pack(fill="x", padx=14, pady=(0, 2))
-            return f
-
-        def mk_entry(parent: tk.Widget, var: tk.StringVar) -> tk.Entry:
-            e = tk.Entry(
-                parent, textvariable=var,
-                bg=p["entry_bg"], fg=p["entry_fg"],
-                insertbackground=p["entry_fg"],
-                relief="flat", bd=0,
-                highlightthickness=1,
-                highlightbackground=p["border"],
-                highlightcolor=p["accent"],
-                font=("Segoe UI", 9),
-            )
-            self._r_entry.append(e)
-            return e
-
-        def mk_browse(parent: tk.Widget, cmd: Any) -> tk.Button:
-            return tk.Button(
-                parent, text="...", command=cmd,
-                bg=p["btn"], fg=p["text"],
-                activebackground=p["btn_hover"],
-                activeforeground=p["text"],
-                relief="flat", bd=0,
-                padx=10, pady=4,
-                font=("Segoe UI", 10),
-                cursor="hand2",
-            )
-
-        # Model checkpoint
-        r = lbl_row("Model checkpoint")
-        mk_entry(r, self.model_path).pack(
-            side="left", fill="x", expand=True, ipady=5
-        )
-        mk_browse(r, self._browse_model).pack(side="left", padx=(6, 0))
-
-        # Camera index
-        r2 = lbl_row("Camera index")
-        tk.Spinbox(
-            r2,
-            from_=0, to=10,
-            textvariable=self.camera_idx,
-            width=8,
-            bg=p["entry_bg"], fg=p["entry_fg"],
-            insertbackground=p["entry_fg"],
-            buttonbackground=p["btn"],
-            relief="flat", bd=0,
-            highlightthickness=1,
-            highlightbackground=p["border"],
-            font=("Segoe UI", 9),
-        ).pack(anchor="w", ipady=5)
-
-        # Output video
-        r3 = lbl_row("Output video (optional)")
-        mk_entry(r3, self.output_path).pack(
-            side="left", fill="x", expand=True, ipady=5
-        )
-        mk_browse(r3, self._browse_output).pack(side="left", padx=(6, 0))
-
-        # VOSK model directory
-        r4 = lbl_row("VOSK model directory")
-        mk_entry(r4, self.vosk_model_path).pack(
-            side="left", fill="x", expand=True, ipady=5
-        )
-        mk_browse(r4, self._browse_vosk_model).pack(side="left", padx=(6, 0))
-
-        tk.Button(
-            dlg, text="Close", command=dlg.destroy,
-            bg=p["accent"], fg="#FFFFFF",
-            activebackground=p["btn_hover"],
-            activeforeground="#FFFFFF",
-            relief="flat", bd=0,
-            padx=20, pady=8,
-            font=("Segoe UI", 10, "bold"),
-            cursor="hand2",
-        ).pack(pady=(18, 16))
-
-        self.root.update_idletasks()
-        dlg.update_idletasks()
-        px = self.root.winfo_x() + self.root.winfo_width() // 2
-        py = self.root.winfo_y() + self.root.winfo_height() // 2
-        dlg.geometry(
-            "+%d+%d" % (px - dlg.winfo_width() // 2,
-                        py - dlg.winfo_height() // 2)
-        )
-
-    # ── browse helpers ────────────────────────────────────────────────────────
-
-    def _browse_model(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select model checkpoint",
-            filetypes=[
-                ("PyTorch checkpoint", "*.pt *.pth"),
-                ("All files", "*.*"),
-            ],
-        )
-        if path:
-            self.model_path.set(path)
-            self.pipeline = None  # force reload
-
-    def _browse_output(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Save output video as",
-            defaultextension=".mp4",
-            filetypes=[("MP4", "*.mp4"), ("AVI", "*.avi")],
-        )
-        if path:
-            self.output_path.set(path)
-
-    def _browse_vosk_model(self) -> None:
-        path = filedialog.askdirectory(title="Select VOSK model directory")
-        if path:
-            self.vosk_model_path.set(path)
-
-    # ── source handlers ───────────────────────────────────────────────────────
-
-    def _on_camera_clicked(self) -> None:
-        self.source_type.set("webcam")
-        self.input_path.set("")
-        self._set_mode_button_state()
-        self._start_stream()
-
-    def _on_video_clicked(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select video",
-            filetypes=[
-                ("Video files", "*.mp4 *.avi *.mov *.mkv *.webm"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not path:
-            return
-        self.source_type.set("video")
-        self.input_path.set(path)
-        self._set_mode_button_state()
-        self._start_stream()
-
-    def _on_image_clicked(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select image",
-            filetypes=[
-                ("Image files", "*.jpg *.jpeg *.png *.bmp *.webp"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not path:
-            return
-        if self.running:
-            self._stop_stream("Restarting with image")
-        self.source_type.set("image")
-        self.input_path.set(path)
-        self._set_mode_button_state()
-        self._run_image(path)
-
-    def _on_open_json(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Open JSON",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            payload = json.loads(
-                Path(path).read_text(encoding="utf-8")
-            )
-        except Exception as exc:
-            messagebox.showerror("JSON error", str(exc))
-            return
-
-        self.speech_sentiment = str(
-            payload.get("speech_sentiment", "NEUTRAL")
-        ).upper()
-        self.speech_confidence = float(
-            payload.get("speech_confidence", 0.93)
-        )
-        self.toxicity_score = float(payload.get("toxicity", 0.0))
-        tox_lbl = "TOXIC" if self.toxicity_score >= 0.6 else "NEUTRAL"
-        raw = str(payload.get("text", "~")).strip() or "~"
-        text_val = raw[:117] + "..." if len(raw) > 120 else raw
-
-        self.speech_var.set(
-            f"Speech: {self.speech_sentiment}"
-            f" ({self.speech_confidence:.2f})"
-        )
-        self.toxicity_var.set(
-            f"Toxicity: {tox_lbl} ({self.toxicity_score:.1f})"
-        )
-        self.text_var.set(f"Text: {text_val}")
-        self.status_var.set(f"JSON loaded: {Path(path).name}")
-        self._refresh_overlay()
-
-    def _on_stop_clicked(self) -> None:
-        if self.running:
-            self._stop_stream("Stopped by user")
-
-    def _on_voice_toggle(self) -> None:
-        if self.voice_enabled:
-            self._stop_voice_recognition("Voice recognition stopped")
+    def _begin_runtime(self) -> None:
+        if self.state.camera_enabled:
+            self._open_camera(self.state.camera_index)
+            if self._camera is not None and self._camera.isOpened():
+                self._capture_timer.start()
+            else:
+                self._show_placeholder_frame()
         else:
+            self._show_placeholder_frame()
+
+        if self.state.mic_enabled:
             self._start_voice_recognition()
 
-    def _start_voice_recognition(self) -> None:
-        model_dir = self.vosk_model_path.get().strip()
-        model_path = Path(model_dir) if model_dir else None
-        if model_path is None or not self._is_valid_vosk_model_dir(model_path):
-            auto_model = self._default_vosk_model()
-            if auto_model:
-                self.vosk_model_path.set(auto_model)
-                model_dir = auto_model
+    def _apply_layout(self) -> None:
+        self.background.setGeometry(self.rect())
+        self._position_title_bar()
+        self._position_left_panel()
+        self._position_subtitle()
+        self._position_player_controls()
+        self._position_bottom_panel()
+        self.title_bar.raise_()
+        self.left_panel.raise_()
+        self.subtitle_panel.raise_()
+        self.subtitle.raise_()
+        self.player_controls.raise_()
+        self.bottom_controls.raise_()
 
-        if not model_dir:
-            messagebox.showerror(
-                "Voice error",
-                "Set VOSK model directory in Settings first.",
-            )
-            return
+    def _position_title_bar(self) -> None:
+        width = self.width() - 32
+        self.title_bar.setGeometry(16, 12, width, 42)
 
-        try:
-            recognizer = VoskMicrophoneRecognizer(model_path=model_dir)
-            recognizer.start(
-                on_partial=self._on_voice_partial,
-                on_final=self._on_voice_final,
-                on_error=self._on_voice_error,
-            )
-        except Exception as exc:
-            messagebox.showerror("Voice error", str(exc))
-            return
+    def _position_left_panel(self) -> None:
+        width = min(390, max(300, int(self.width() * 0.28)))
+        height = min(284, max(240, int(self.height() * 0.38)))
+        top = self.title_bar.geometry().bottom() + 16
+        self.left_panel.setGeometry(24, top, width, height)
 
-        self.voice_recognizer = recognizer
-        self.voice_enabled = True
-        if self.btn_voice is not None:
-            self.btn_voice.configure(text="Voice: On", bg=self._p["btn_active"])
-        self.status_var.set("Voice recognition started")
-
-    def _stop_voice_recognition(self, reason: str = "") -> None:
-        self.voice_enabled = False
-        if self.voice_recognizer is not None:
-            self.voice_recognizer.stop()
-            self.voice_recognizer = None
-        self.partial_subtitle = ""
-        self._update_subtitle_vars()
-        if self.btn_voice is not None:
-            self.btn_voice.configure(text="Voice: Off", bg=self._p["btn"])
-        if reason:
-            self.status_var.set(reason)
-
-    def _on_voice_partial(self, text: str) -> None:
-        self.root.after(0, lambda: self._set_partial_subtitle(text))
-
-    def _on_voice_final(self, text: str) -> None:
-        self.root.after(0, lambda: self._set_final_subtitle(text))
-
-    def _on_voice_error(self, err: str) -> None:
-        self.root.after(0, lambda: self.status_var.set(f"Voice error: {err}"))
-
-    def _set_partial_subtitle(self, text: str) -> None:
-        self.partial_subtitle = text.strip()
-        self._update_subtitle_vars()
-
-    def _set_final_subtitle(self, text: str) -> None:
-        clean = text.strip()
-        if not clean:
-            return
-        self.final_subtitle = clean
-        self.partial_subtitle = ""
-        clipped = self._truncate_text(clean, 160)
-        self.text_var.set(f"Text: {clipped}")
-        self.status_var.set("Voice captured")
-        self._update_subtitle_vars()
-
-    def _build_subtitle_text(self) -> str:
-        if self.partial_subtitle:
-            return self.partial_subtitle
-        if self.final_subtitle:
-            return self.final_subtitle
-        return ""
-
-    def _truncate_text(self, value: str, limit: int) -> str:
-        txt = value.strip()
-        if len(txt) <= limit:
-            return txt
-        return txt[: max(limit - 3, 0)] + "..."
-
-    def _update_subtitle_vars(self) -> None:
-        text = self._build_subtitle_text()
-        clipped = self._truncate_text(text, 120)
-        line = clipped if clipped else "~"
-        self.subtitle_var.set(f"Subtitles: {line}")
-        if self.subtitle_lbl is not None:
-            self.subtitle_lbl.configure(text=self._truncate_text(text, 180))
-
-    # ── single image inference ────────────────────────────────────────────────
-
-    def _run_image(self, image_path: str) -> None:
-        if not self._ensure_pipeline():
-            return
-        assert self.pipeline is not None
-
-        img = cv2.imread(image_path)
-        if img is None:
-            messagebox.showerror(
-                "Error", "Cannot read selected image."
-            )
-            self.status_var.set("Image read failed")
-            return
-
-        self.status_var.set("Analysing image...")
-        self.root.update_idletasks()
-
-        results = self.pipeline.process_frame(img)
-        out = self.pipeline.draw_results(img, results)
-        self._show_frame(out)
-
-        ts = int(time.time() * 1000)
-        self._update_dashboard(results, ts)
-        self.source_var.set(
-            f"Source: image ({Path(image_path).name})"
-        )
-
-        if results:
-            names = ", ".join(r["emotion"].upper() for r in results)
-            self.status_var.set(f"Detected: {names}")
+    def _position_subtitle(self) -> None:
+        text = self.state.subtitle.strip()
+        max_width = min(760, int(self.width() * 0.54))
+        min_width = 260
+        if text:
+            metrics = self.subtitle.fontMetrics()
+            bounds = metrics.boundingRect(0, 0, max_width - 32, 800, int(Qt.TextFlag.TextWordWrap), text)
+            panel_width = max(min_width, min(max_width, bounds.width() + 44))
+            panel_height = max(64, min(168, bounds.height() + 28))
         else:
-            self.status_var.set("No faces detected")
+            panel_width = min_width
+            panel_height = 64
 
-    # ── pipeline ──────────────────────────────────────────────────────────────
+        x = int((self.width() - panel_width) / 2)
+        controls_gap = 92 if self.player_controls.isVisible() else 28
+        y = self.height() - panel_height - controls_gap
+        self.subtitle_panel.setGeometry(x, y, panel_width, panel_height)
+        self.subtitle.setGeometry(16, 10, panel_width - 32, panel_height - 20)
 
-    def _ensure_pipeline(self) -> bool:
-        if self.pipeline is not None:
-            return True
-        self.status_var.set("Loading model...")
-        self.root.update_idletasks()
-        mp = self.model_path.get().strip() or None
-        self.pipeline = self._load_pipeline(mp)
-        return self.pipeline is not None
+    def _position_player_controls(self) -> None:
+        width = self.player_controls.width()
+        height = self.player_controls.height()
+        x = int((self.width() - width) / 2)
+        y = self.subtitle_panel.geometry().bottom() + 10
+        self.player_controls.setGeometry(x, y, width, height)
 
-    def _load_pipeline(
-        self, model_path: Optional[str]
-    ) -> Optional[Any]:
+    def _bottom_geometry(self) -> QRect:
+        width = self.bottom_controls.width()
+        height = self.bottom_controls.height()
+        x = self.width() - width - 24
+        y = int((self.height() - height) / 2)
+        return QRect(x, y, width, height)
+
+    def _position_bottom_panel(self) -> None:
+        geometry = self._bottom_geometry()
+        self.bottom_controls.setGeometry(geometry)
+
+    def _grab_frame(self) -> None:
+        if self._source_mode == "camera" and not self.state.camera_enabled:
+            return
+        if self._source_mode == "video" and self._video_paused:
+            return
+        if self._camera is None or not self._camera.isOpened():
+            self._show_placeholder_frame()
+            return
+        ok, frame = self._camera.read()
+        if not ok or frame is None:
+            if self._source_mode == "video":
+                self._video_ended = True
+                self._video_paused = True
+                self.player_controls.play_pause_button.setText("▶")
+                self.status_chip.setText("Video ended")
+                if self._last_frame is not None:
+                    self.update_frame(self._last_frame)
+                return
+            self._show_placeholder_frame()
+            return
+        analyzed = self._analyze_frame(frame)
+        self._current_frame = analyzed
+        self._last_frame = analyzed
+        self.update_frame(analyzed)
+
+    def _analyze_frame(self, frame: np.ndarray) -> np.ndarray:
         try:
-            from src.pipeline import EmotionPipeline
-            return EmotionPipeline(
+            pipeline = self._ensure_pipeline()
+        except Exception:
+            pipeline = None
+        if pipeline is None:
+            return frame
+
+        if self._source_mode == "video":
+            self._video_frame_index += 1
+            analyze_now = (self._video_frame_index % self._video_analyze_every_n == 0) or not self._cached_results
+            if analyze_now and not self._analysis_busy:
+                frame_copy = frame.copy()
+                self._analysis_busy = True
+                threading.Thread(target=self._run_async_inference, args=(pipeline, frame_copy), daemon=True).start()
+            with self._analysis_lock:
+                results = list(self._cached_results)
+            if self._analysis_exception:
+                self.status_chip.setText("Analysis warning")
+                self._analysis_exception = None
+        else:
+            results = pipeline.process_frame(frame)
+
+        output = pipeline.draw_results(frame, results)
+        if results:
+            best = max(results, key=lambda item: float(item.get("confidence", 0.0)))
+            emotion = str(best.get("emotion", "neutral")).upper()
+            confidence = float(best.get("confidence", 0.0))
+        else:
+            emotion = "NO FACE"
+            confidence = 0.0
+
+        voice_confidence = 0.0 if not self.state.mic_enabled else max(self.state.voice_confidence, 0.15)
+        self.set_emotion_state(emotion, confidence, voice_confidence)
+        self.status_chip.setText("Analyzing" if results else "No face")
+        return output
+
+    def _run_async_inference(self, pipeline: EmotionPipeline, frame: np.ndarray) -> None:
+        try:
+            results = pipeline.process_frame(frame)
+            with self._analysis_lock:
+                self._cached_results = results
+        except Exception as exc:
+            self._analysis_exception = str(exc)
+        finally:
+            self._analysis_busy = False
+
+    def _ensure_pipeline(self) -> Optional[EmotionPipeline]:
+        if self._pipeline is not None:
+            return self._pipeline
+        if self._analysis_loading:
+            return None
+        self._analysis_loading = True
+        self.status_chip.setText("Loading model")
+        model_path = self._default_model_path()
+        try:
+            self._pipeline = EmotionPipeline(
                 model_checkpoint=model_path,
                 face_confidence=0.85,
                 input_size=112,
             )
+            self.status_chip.setText("Model ready")
+            return self._pipeline
         except Exception as exc:
-            messagebox.showerror("Runtime error", str(exc))
-            self.status_var.set("Model load failed")
+            self.status_chip.setText("Analysis failed")
+            self.set_subtitle(f"Model load failed: {exc}")
             return None
+        finally:
+            self._analysis_loading = False
 
-    # ── streaming ─────────────────────────────────────────────────────────────
+    def _show_placeholder_frame(self) -> None:
+        width, height = 1280, 720
+        background = np.zeros((height, width, 3), dtype=np.uint8)
+        gradient = np.linspace(12, 44, width, dtype=np.uint8)
+        background[:, :, 0] = gradient
+        background[:, :, 1] = gradient // 2
+        background[:, :, 2] = gradient // 3
+        self.update_frame(background)
 
-    def _start_stream(self) -> None:
-        if self.running:
-            self._stop_stream("Restarting")
-
-        if not self._ensure_pipeline():
+    def update_frame(self, cv_img: object) -> None:
+        if not isinstance(cv_img, np.ndarray):
             return
-
-        if self.source_type.get() == "webcam":
-            source: Union[int, str] = int(self.camera_idx.get())
-            self.source_var.set("Source: camera")
+        if cv_img.ndim == 2:
+            rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_GRAY2RGB)
         else:
-            source = self.input_path.get().strip()
-            if not source or not Path(str(source)).exists():
-                messagebox.showerror("Error", "Video file not found.")
-                return
-            self.source_var.set(
-                f"Source: video ({Path(str(source)).name})"
+            rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        height, width, channels = rgb_img.shape
+        image = QImage(rgb_img.data, width, height, channels * width, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(image.copy())
+        self._current_frame = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB) if cv_img.ndim == 3 else rgb_img
+        self.background.setPixmap(
+            pixmap.scaled(
+                self.background.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
             )
+        )
+        self.background.setGeometry(self.rect())
 
-        self.cap = cv2.VideoCapture(source)
-        if not self.cap.isOpened():
-            self.cap = None
-            messagebox.showerror(
-                "Error", "Cannot open video source."
-            )
-            self.status_var.set("Source open failed")
+    def _emotion_color(self, emotion: str) -> QColor:
+        return QColor(EMOTION_COLORS.get(emotion.upper(), "#E5E7EB"))
+
+    def set_emotion_state(self, emotion: str, face_confidence: float, voice_confidence: float) -> None:
+        self.state.emotion = emotion.upper().strip() or "NEUTRAL"
+        self.state.face_confidence = max(0.0, min(1.0, float(face_confidence)))
+        self.state.voice_confidence = max(0.0, min(1.0, float(voice_confidence)))
+        accent = self._emotion_color(self.state.emotion)
+        label = "No face" if self.state.emotion == "NO FACE" else self.state.emotion
+        self.final_emotion_label.setText(label)
+        self.final_emotion_label.setStyleSheet(f"color: {accent.name()};")
+        self.face_bar.setAccent(accent)
+        self.face_bar.setValue(self.state.face_confidence)
+        self.voice_bar.setAccent(QColor(96, 165, 250))
+        self.voice_bar.setValue(self.state.voice_confidence)
+
+    def set_subtitle(self, text: str) -> None:
+        clean = text.strip() if text else ""
+        self.state.subtitle = clean
+        self.subtitle.setText(clean)
+        visible = bool(clean) and self.state.show_subtitles and self.state.mic_enabled
+        self.subtitle_panel.setVisible(visible)
+        self._position_subtitle()
+        if visible:
+            self._subtitle_hide_timer.start()
+        else:
+            self._subtitle_hide_timer.stop()
+        if clean and self.state.mic_enabled and self.state.show_subtitles:
+            self.status_chip.setText("Mic on")
+
+    def _hide_subtitle_panel(self) -> None:
+        self.subtitle_panel.setVisible(False)
+
+    def toggle_camera(self) -> None:
+        if self._source_mode == "video":
+            self._source_mode = "camera"
+            self._video_path = None
+            self._video_paused = False
+            self._video_ended = False
+            self._analysis_busy = False
+            self._cached_results = []
+            self._video_frame_index = 0
+            self.player_controls.setVisible(False)
+            self.state.camera_enabled = True
+            self.bottom_controls.camera_button.setChecked(True)
+            self.bottom_controls._refresh_button_style()
+            self._open_camera(self.state.camera_index)
+            self._capture_timer.setInterval(self._camera_timer_interval_ms)
+            if self._camera is not None and self._camera.isOpened():
+                self._capture_timer.start()
+            else:
+                self._show_placeholder_frame()
+            self._apply_layout()
             return
 
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 25
-        self.writer = self._make_writer(
-            self.output_path.get().strip(), fps
+        self.state.camera_enabled = not self.state.camera_enabled
+        self.bottom_controls.camera_button.setChecked(self.state.camera_enabled)
+        self.bottom_controls._refresh_button_style()
+        if self.state.camera_enabled:
+            self._source_mode = "camera"
+            self._video_path = None
+            self._video_paused = False
+            self._video_ended = False
+            self._analysis_busy = False
+            self._cached_results = []
+            self._video_frame_index = 0
+            self.player_controls.setVisible(False)
+            self._open_camera(self.state.camera_index)
+            self._capture_timer.setInterval(self._camera_timer_interval_ms)
+            if self._camera is not None and self._camera.isOpened():
+                self._capture_timer.start()
+            else:
+                self._show_placeholder_frame()
+        else:
+            self._capture_timer.stop()
+            self._release_camera()
+            self._show_placeholder_frame()
+        self._apply_layout()
+
+    def toggle_mic(self) -> None:
+        self.state.mic_enabled = not self.state.mic_enabled
+        self.bottom_controls.mic_button.setChecked(self.state.mic_enabled)
+        self.bottom_controls._refresh_button_style()
+        if self.state.mic_enabled:
+            self._start_voice_recognition()
+        else:
+            self._stop_voice_recognition()
+            self._subtitle_hide_timer.stop()
+            self.subtitle_panel.setVisible(False)
+        self.status_chip.setText("Mic on" if self.state.mic_enabled else "Mic off")
+
+    def load_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select video",
+            "",
+            "Video files (*.mp4 *.avi *.mov *.mkv *.webm);;All files (*.*)",
         )
+        if not path:
+            return
 
-        while not self._frame_q.empty():
-            try:
-                self._frame_q.get_nowait()
-            except queue.Empty:
-                break
+        if not self._open_video(path):
+            self.status_chip.setText("Video open failed")
+            return
 
-        self.running = True
-        self._toggle_stream_ui(True)
-        self.status_var.set("Streaming...")
+        self._source_mode = "video"
+        self._video_path = path
+        self._video_paused = False
+        self._video_ended = False
+        self._analysis_busy = False
+        self._cached_results = []
+        self._video_frame_index = 0
+        self.player_controls.play_pause_button.setText("⏸")
+        self.player_controls.setVisible(True)
+        self.bottom_controls.camera_button.setChecked(False)
+        self.bottom_controls._refresh_button_style()
+        self._capture_timer.setInterval(self._video_timer_interval_ms)
+        self._capture_timer.start()
+        self.status_chip.setText(f"Video: {Path(path).name}")
+        self._apply_layout()
 
-        self._infer_thread = threading.Thread(
-            target=self._inference_worker, args=(fps,), daemon=True
+    def toggle_video_play_pause(self) -> None:
+        if self._source_mode != "video":
+            return
+        if self._video_ended:
+            self.status_chip.setText("Press restart")
+            return
+        self._video_paused = not self._video_paused
+        if self._video_paused:
+            self.player_controls.play_pause_button.setText("▶")
+            self.status_chip.setText("Paused")
+        else:
+            self.player_controls.play_pause_button.setText("⏸")
+            self.status_chip.setText("Playing")
+
+    def restart_video(self) -> None:
+        if self._source_mode != "video":
+            return
+        if self._camera is None or not self._camera.isOpened():
+            if not self._video_path or not self._open_video(self._video_path):
+                self.status_chip.setText("Video reopen failed")
+                return
+        self._camera.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self._video_paused = False
+        self._video_ended = False
+        self._analysis_busy = False
+        self._cached_results = []
+        self._video_frame_index = 0
+        self.player_controls.play_pause_button.setText("⏸")
+        self._capture_timer.start()
+        self.status_chip.setText("Restarted")
+
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+            self.max_button.setText("⛶")
+        else:
+            self.showFullScreen()
+            self.max_button.setText("🗗")
+
+    def open_settings(self) -> None:
+        camera_items = self._available_camera_items()
+        microphone_items = self._available_microphone_items()
+        dialog = SettingsDialog(
+            camera_items=camera_items,
+            microphone_items=microphone_items,
+            current_camera=self.state.camera_index,
+            current_microphone=self.state.mic_device,
+            show_subtitles=self.state.show_subtitles,
+            parent=self,
         )
-        self._infer_thread.start()
-        self.root.after(1, self._poll_frame)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
 
-    def _make_writer(
-        self, path: str, fps: int
-    ) -> Optional[cv2.VideoWriter]:
-        if not path or self.cap is None:
-            return None
-        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter.fourcc(*"mp4v")
-        return cv2.VideoWriter(path, fourcc, fps, (w, h))
+        new_camera = dialog.selected_camera()
+        new_microphone = dialog.selected_microphone()
+        self.state.show_subtitles = dialog.subtitles_enabled()
+        camera_changed = new_camera != self.state.camera_index
+        mic_changed = new_microphone != self.state.mic_device
 
-    def _toggle_stream_ui(self, streaming: bool) -> None:
-        for btn in [
-            self.btn_camera, self.btn_video,
-            self.btn_image, self.btn_json,
-        ]:
-            if btn is not None:
-                if streaming:
-                    btn.configure(state=tk.DISABLED)
-                else:
-                    btn.configure(state=tk.NORMAL)
-        if self.btn_stop is not None:
-            self.btn_stop.configure(
-                state=tk.NORMAL if streaming else tk.DISABLED
-            )
-        if not streaming:
-            self._set_mode_button_state()
+        self.state.camera_index = new_camera
+        self.state.mic_device = new_microphone
 
-    # ── inference thread ──────────────────────────────────────────────────────
+        if camera_changed:
+            self._restart_camera(new_camera)
 
-    def _inference_worker(self, fps: int) -> None:
-        interval = 1.0 / max(fps, 1)
-        pipeline = self.pipeline
-        cap = self.cap
-        writer = self.writer
+        if mic_changed and self.state.mic_enabled:
+            self._stop_voice_recognition()
+            self._start_voice_recognition()
 
-        while self.running and cap is not None and pipeline is not None:
-            t0 = time.monotonic()
-            ok, frame = cap.read()
-            if not ok:
-                try:
-                    self._frame_q.put(None, timeout=1)
-                except queue.Full:
-                    pass
-                break
+        if not self.state.show_subtitles or not self.state.mic_enabled:
+            self._subtitle_hide_timer.stop()
+            self.subtitle_panel.setVisible(False)
+        elif self.state.subtitle:
+            self.subtitle_panel.setVisible(True)
 
-            ts_ms = int(time.time() * 1000)
-            results = pipeline.process_frame(frame)
-            out = pipeline.draw_results(frame, results)
+        self.status_chip.setText(
+            f"Camera {self.state.camera_index} | Mic {self.state.mic_device if self.state.mic_device is not None else 'default'}"
+        )
+        self.set_subtitle("Devices updated")
 
-            if writer is not None:
-                writer.write(out)
+    def _default_model_path(self) -> Optional[str]:
+        root = Path(__file__).resolve().parent.parent
+        candidates = [
+            root / "checkpoints_rafdb" / "best_emotion_model.pt",
+            root / "checkpoints" / "best_emotion_model.pt",
+        ]
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        return None
 
-            stale = int((time.monotonic() - t0) * fps)
-            for _ in range(min(stale, 8)):
-                cap.grab()
+    def _default_vosk_model_path(self) -> Optional[str]:
+        root = Path(__file__).resolve().parent.parent
+        candidates = [
+            root / "voskmodel" / "vosk-model-small-ru-0.22",
+            root / "vosk-model-small-ru-0.22",
+        ]
+        for path in candidates:
+            if self._is_valid_vosk_model_dir(path):
+                return str(path)
+        return None
 
-            if self._frame_q.full():
-                try:
-                    self._frame_q.get_nowait()
-                except queue.Empty:
-                    pass
-            try:
-                self._frame_q.put_nowait((out, results, ts_ms))
-            except queue.Full:
-                pass
+    def _is_valid_vosk_model_dir(self, path: Path) -> bool:
+        required = ["am", "conf", "graph"]
+        return path.exists() and path.is_dir() and all((path / item).exists() for item in required)
 
-            spare = interval - (time.monotonic() - t0)
-            if spare > 0:
-                time.sleep(spare)
+    def _available_camera_items(self) -> list[tuple[str, int]]:
+        items = list(self._camera_items_cache)
+        if self.state.camera_index not in [value for _, value in items]:
+            items.insert(0, (f"Camera {self.state.camera_index}", self.state.camera_index))
+        return items
 
-    # ── display loop ──────────────────────────────────────────────────────────
+    def _available_microphone_items(self) -> list[tuple[str, Optional[int]]]:
+        items: list[tuple[str, Optional[int]]] = [("Default microphone", None)]
+        if sd is None:
+            return items
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return items
+        for index, device in enumerate(devices):
+            if int(device.get("max_input_channels", 0)) > 0:
+                name = str(device.get("name", f"Device {index}"))
+                items.append((f"{name} ({index})", index))
+        return items
 
-    def _poll_frame(self) -> None:
-        if not self.running:
+    def _create_capture(self, index: int) -> cv2.VideoCapture:
+        if sys.platform.startswith("win"):
+            capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+            if capture.isOpened():
+                return capture
+            capture.release()
+        return cv2.VideoCapture(index)
+
+    def _open_camera(self, index: int) -> bool:
+        self._release_camera()
+        capture = self._create_capture(index)
+        if not capture.isOpened():
+            self._camera = None
+            self.status_chip.setText(f"Camera {index} unavailable")
+            return False
+        self._camera = capture
+        self.state.camera_index = index
+        self.status_chip.setText(f"Camera {index}")
+        return True
+
+    def _open_video(self, path: str) -> bool:
+        self._release_camera()
+        capture = cv2.VideoCapture(path)
+        if not capture.isOpened():
+            self._camera = None
+            return False
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        if fps <= 1.0 or fps > 240.0:
+            fps = 30.0
+        self._video_timer_interval_ms = max(12, min(42, int(1000.0 / fps)))
+        self._camera = capture
+        return True
+
+    def _restart_camera(self, index: int) -> None:
+        was_running = self._capture_timer.isActive()
+        self._capture_timer.stop()
+        if self._open_camera(index) and self.state.camera_enabled and was_running:
+            self._capture_timer.start()
+        elif self.state.camera_enabled:
+            self._show_placeholder_frame()
+
+    def _release_camera(self) -> None:
+        if self._camera is not None:
+            self._camera.release()
+            self._camera = None
+
+    def _start_voice_recognition(self) -> None:
+        if self._voice_recognizer is not None or not self._voice_model_path:
             return
         try:
-            item = self._frame_q.get_nowait()
-        except queue.Empty:
-            self.root.after(5, self._poll_frame)
+            self._voice_recognizer = VoskMicrophoneRecognizer(
+                model_path=self._voice_model_path,
+                device=self.state.mic_device,
+            )
+            self._voice_recognizer.start(
+                on_partial=lambda text: self.voice_partial.emit(text),
+                on_final=lambda text: self.voice_final.emit(text),
+                on_error=lambda text: self.voice_error.emit(text),
+            )
+            self.status_chip.setText("Mic on")
+        except Exception as exc:
+            self._voice_recognizer = None
+            self.state.mic_enabled = False
+            self.bottom_controls.mic_button.setChecked(False)
+            self.bottom_controls._refresh_button_style()
+            self.status_chip.setText("Mic error")
+            self.set_subtitle(f"Voice disabled: {exc}")
+
+    def _stop_voice_recognition(self) -> None:
+        if self._voice_recognizer is None:
             return
-        if item is None:
-            self._stop_stream("Stream ended")
+        try:
+            self._voice_recognizer.stop()
+        finally:
+            self._voice_recognizer = None
+
+    def _on_voice_partial(self, text: str) -> None:
+        clean = text.strip()
+        if clean:
+            self.set_subtitle(clean)
+
+    def _on_voice_final(self, text: str) -> None:
+        clean = text.strip()
+        if clean:
+            self.set_subtitle(clean)
+
+    def _on_voice_error(self, text: str) -> None:
+        self.status_chip.setText("Mic error")
+        self.set_subtitle(text)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_layout()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
             return
-        frame, results, ts_ms = item
-        self._show_frame(frame)
-        self._update_dashboard(results, ts_ms)
-        self.root.after(1, self._poll_frame)
+        super().keyPressEvent(event)
 
-    def _show_frame(self, bgr: Any) -> None:
-        if self.preview_lbl is None:
-            return
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        fh, fw = rgb.shape[:2]
-        max_w = max(self.preview_lbl.winfo_width() - 4, 320)
-        max_h = max(self.preview_lbl.winfo_height() - 4, 240)
-        scale = min(max_w / fw, max_h / fh)
-        nw, nh = max(int(fw * scale), 1), max(int(fh * scale), 1)
-        resized = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
-        self.photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
-        self.preview_lbl.configure(image=self.photo, text="")
-
-    # ── dashboard update ──────────────────────────────────────────────────────
-
-    def _update_dashboard(
-        self, results: list[dict], ts_ms: int
-    ) -> None:
-        if results:
-            best = max(
-                results,
-                key=lambda r: float(r.get("confidence", 0.0)),
-            )
-            self.overlay_face = str(
-                best.get("emotion", "neutral")
-            ).upper()
-            conf = float(best.get("confidence", 0.0))
-            self.face_var.set(
-                f"Face emotion: {self.overlay_face} ({conf:.2f})"
-            )
-        else:
-            self.overlay_face = "NEUTRAL"
-            self.face_var.set("Face emotion: NEUTRAL (0.00)")
-
-        self.speech_var.set(
-            "Speech: MIC ON (VOSK)"
-            if self.voice_enabled
-            else (
-                f"Speech: {self.speech_sentiment}"
-                f" ({self.speech_confidence:.2f})"
-            )
-        )
-        tox_lbl = "TOXIC" if self.toxicity_score >= 0.6 else "NEUTRAL"
-        self.toxicity_var.set(
-            f"Toxicity: {tox_lbl} ({self.toxicity_score:.1f})"
-        )
-
-        final = self._compose_final(
-            self.overlay_face, self.speech_sentiment
-        )
-        self.summary_title_var.set(f"Final emotion: {final}")
-        self._refresh_overlay()
-
-        if self.frame_time_lbl is not None:
-            self.frame_time_lbl.configure(
-                text=f"Last frame: {ts_ms} ms"
-            )
-
-        if self.timeline is not None:
-            self._row_id += 1
-            self.timeline.insert(
-                "", "end", iid=str(self._row_id),
-                values=(
-                    ts_ms, self.overlay_face,
-                    self.speech_sentiment, final,
-                ),
-            )
-            children = self.timeline.get_children()
-            if len(children) > 250:
-                self.timeline.delete(children[0])
-            self.timeline.yview_moveto(1.0)
-
-    def _compose_final(self, face: str, speech: str) -> str:
-        fu, su = face.upper(), speech.upper()
-        if fu == su:
-            return fu
-        if su == "NEUTRAL":
-            return fu
-        if fu == "NEUTRAL":
-            return su
-        return fu
-
-    def _refresh_overlay(self) -> None:
-        if self.overlay_lbl is None:
-            return
-        final = (
-            self.summary_title_var.get()
-            .split(":", maxsplit=1)[-1]
-            .strip()
-            .upper()
-        )
-        self.overlay_lbl.configure(
-            text=(
-                f"{final} \u00b7 face {self.overlay_face}"
-                f" \u00b7 voice {self.speech_sentiment}"
-            )
-        )
-
-    # ── cleanup ───────────────────────────────────────────────────────────────
-
-    def _stop_stream(self, reason: str) -> None:
-        self.running = False
-        if self._infer_thread is not None:
-            self._infer_thread.join(timeout=2)
-            self._infer_thread = None
-        while not self._frame_q.empty():
-            try:
-                self._frame_q.get_nowait()
-            except queue.Empty:
-                break
-        if self.writer is not None:
-            self.writer.release()
-            self.writer = None
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-        self._toggle_stream_ui(False)
-        self.status_var.set(reason)
-        self.photo = None
-        if self.preview_lbl is not None:
-            self.preview_lbl.configure(image="", text="Waiting for stream")
-
-    def _on_close(self) -> None:
-        if self.running:
-            self._stop_stream("Stopped")
-        if self.voice_enabled:
-            self._stop_voice_recognition()
-        self.root.destroy()
+    def closeEvent(self, event) -> None:
+        if self._capture_timer.isActive():
+            self._capture_timer.stop()
+        self._release_camera()
+        self._stop_voice_recognition()
+        event.accept()
 
 
-def main() -> None:
-    root = tk.Tk()
-    EmotionApp(root)
-    root.mainloop()
+def main() -> int:
+    app = QApplication(sys.argv)
+    app.setApplicationName("Emotion AI Live Analyzer")
+    app.setStyle("Fusion")
+    window = EmotionAILiveAnalyzer()
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
