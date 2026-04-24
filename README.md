@@ -12,7 +12,6 @@
 ## Что входит в поставку
 
 - готовый чекпоинт: `checkpoints_production/best_emotion_model.pt`
-- готовая директория модели VOSK: `vosk-model-small-ru-0.22/`
 - графический интерфейс: `scripts/run_ui.py`
 - CLI-инференс: `scripts/run_inference.py`
 
