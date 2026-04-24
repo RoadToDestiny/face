@@ -13,6 +13,7 @@ data/
 *.pt
 vosk-model*/
 models/vosk-model*/
+rubert-base-cased-russian-sentiment/
 # IDE
 .idea/
 .vscode/
@@ -21,3 +22,4 @@ models/vosk-model*/
 # OS
 .DS_Store
 Thumbs.db
+

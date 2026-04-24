@@ -31,10 +31,12 @@ class RetinaFaceDetector:
         confidence_threshold: float = 0.9,
         align: bool = True,
         detection_size: Optional[Tuple[int, int]] = None,
+        crop_padding_ratio: float = 0.12,
     ):
         self.confidence_threshold = confidence_threshold
         self.align = align
         self.detection_size = detection_size or (640, 640)
+        self.crop_padding_ratio = max(0.0, min(0.35, float(crop_padding_ratio)))
         self._mtcnn = None
 
     def _ensure_mtcnn(self):
@@ -116,7 +118,7 @@ class RetinaFaceDetector:
 
         w = x2 - x1
         h = y2 - y1
-        pad = int(0.25 * max(w, h))
+        pad = int(self.crop_padding_ratio * max(w, h))
         x1_p = max(0, x1 - pad)
         y1_p = max(0, y1 - pad)
         x2_p = min(image.shape[1], x2 + pad)

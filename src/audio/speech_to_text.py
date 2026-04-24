@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import queue
+import shutil
+import subprocess
 import threading
+import wave
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -25,6 +29,124 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 TextCallback = Callable[[str], None]
 ErrorCallback = Callable[[str], None]
+
+
+@dataclass
+class TranscriptSegment:
+    start: float
+    end: float
+    text: str
+
+
+def extract_audio_track(video_path: str, output_wav_path: str, sample_rate: int = 16000) -> None:
+    """Extract mono PCM WAV audio from a video file using ffmpeg."""
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if ffmpeg_exe is None:
+        try:
+            from imageio_ffmpeg import get_ffmpeg_exe
+
+            ffmpeg_exe = get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_exe = None
+
+    if not ffmpeg_exe:
+        raise RuntimeError(
+            "ffmpeg is required for video audio extraction. "
+            "Install system ffmpeg (PATH) or run: pip install imageio-ffmpeg"
+        )
+
+    command = [
+        str(ffmpeg_exe),
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "wav",
+        str(output_wav_path),
+    ]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise RuntimeError(f"Audio extraction failed. Ensure the video has an audio track. ffmpeg: {stderr}")
+
+
+class VoskAudioFileRecognizer:
+    """Offline VOSK recognizer for WAV files with timestamped segments."""
+
+    def __init__(self, model_path: str, sample_rate: int = 16000) -> None:
+        self.model_path = str(model_path)
+        self.sample_rate = int(sample_rate)
+
+    def transcribe_wav(self, wav_path: str) -> list[TranscriptSegment]:
+        if Model is None or KaldiRecognizer is None:
+            raise RuntimeError("VOSK is not installed. Run: pip install vosk")
+
+        if not self.model_path or not Path(self.model_path).exists():
+            raise RuntimeError("VOSK model path is invalid.")
+
+        path = Path(wav_path)
+        if not path.exists():
+            raise RuntimeError(f"WAV file does not exist: {wav_path}")
+
+        with wave.open(str(path), "rb") as wf:
+            if wf.getnchannels() != 1:
+                raise RuntimeError("WAV must be mono channel for VOSK processing.")
+            if wf.getsampwidth() != 2:
+                raise RuntimeError("WAV must be 16-bit PCM for VOSK processing.")
+
+            model = Model(self.model_path)
+            recognizer = KaldiRecognizer(model, self.sample_rate)
+            recognizer.SetWords(True)
+
+            segments: list[TranscriptSegment] = []
+            while True:
+                chunk = wf.readframes(4000)
+                if len(chunk) == 0:
+                    break
+                if recognizer.AcceptWaveform(chunk):
+                    self._append_segment(segments, recognizer.Result())
+
+            self._append_segment(segments, recognizer.FinalResult())
+
+        merged: list[TranscriptSegment] = []
+        for seg in segments:
+            text = seg.text.strip()
+            if not text:
+                continue
+            if merged and (seg.start - merged[-1].end) <= 0.2:
+                merged[-1] = TranscriptSegment(
+                    start=merged[-1].start,
+                    end=max(merged[-1].end, seg.end),
+                    text=f"{merged[-1].text} {text}".strip(),
+                )
+            else:
+                merged.append(seg)
+        return merged
+
+    def _append_segment(self, segments: list[TranscriptSegment], raw_json: str) -> None:
+        try:
+            payload = json.loads(raw_json or "{}")
+        except Exception:
+            return
+
+        text = str(payload.get("text", "")).strip()
+        words = payload.get("result") or []
+        if not text:
+            return
+
+        if words:
+            start = float(words[0].get("start", 0.0))
+            end = float(words[-1].get("end", start + 1.0))
+        else:
+            start = 0.0
+            end = start + 1.0
+
+        segments.append(TranscriptSegment(start=start, end=max(end, start + 0.1), text=text))
 
 
 class VoskMicrophoneRecognizer:
