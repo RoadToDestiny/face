@@ -184,11 +184,11 @@ class BottomControls(GlassPanel):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("BottomControls")
-        self.setFixedSize(92, 304)
+        self.setFixedSize(92, 248)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
+        layout.setSpacing(18)
 
         self.camera_button = RoundButton("📷")
         self.mic_button = RoundButton("🎤")
@@ -200,10 +200,10 @@ class BottomControls(GlassPanel):
         self.settings_button.setCheckable(False)
         self.camera_button.setChecked(camera_enabled)
         self.mic_button.setChecked(mic_enabled)
+        self.mic_button.setVisible(False)
 
         layout.addStretch(1)
         layout.addWidget(self.camera_button, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.mic_button, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.video_button, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.settings_button, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
@@ -374,8 +374,8 @@ class EmotionAILiveAnalyzer(QMainWindow):
         self.video_emotion_panel = GlassPanel(self.central)
         self.video_emotion_panel.setObjectName("VideoEmotionPanel")
         panel_layout = QVBoxLayout(self.video_emotion_panel)
-        panel_layout.setContentsMargins(14, 12, 14, 12)
-        panel_layout.setSpacing(7)
+        panel_layout.setContentsMargins(16, 14, 16, 14)
+        panel_layout.setSpacing(10)
         self.video_emotion_title = QLabel("Emotion Summary", self.video_emotion_panel)
         self.video_emotion_title.setObjectName("VideoEmotionTitle")
         self.video_final_emotion_label = QLabel("Final: NEUTRAL", self.video_emotion_panel)
@@ -396,7 +396,6 @@ class EmotionAILiveAnalyzer(QMainWindow):
             mic_enabled=self.state.mic_enabled,
         )
         self.bottom_controls.camera_button.clicked.connect(self.toggle_camera)
-        self.bottom_controls.mic_button.clicked.connect(self.toggle_mic)
         self.bottom_controls.video_button.clicked.connect(self.load_video)
         self.bottom_controls.settings_button.clicked.connect(self.open_settings)
 
@@ -448,13 +447,13 @@ class EmotionAILiveAnalyzer(QMainWindow):
             }
             QLabel#VideoEmotionTitle {
                 color: rgba(255, 255, 255, 220);
-                font-size: 13px;
+                font-size: 18px;
                 font-weight: 700;
-                padding-bottom: 2px;
+                padding-bottom: 4px;
             }
             QLabel#VideoEmotionValue {
                 color: rgba(255, 255, 255, 208);
-                font-size: 12px;
+                font-size: 16px;
                 font-weight: 600;
             }
             QLabel#TitleLabel {
@@ -620,8 +619,8 @@ class EmotionAILiveAnalyzer(QMainWindow):
     def _position_subtitle(self) -> None:
         text = self.state.subtitle.strip()
         is_video_mode = self._source_mode == "video"
-        max_width = min(560, int(self.width() * 0.42)) if is_video_mode else min(760, int(self.width() * 0.54))
-        min_width = 220 if is_video_mode else 260
+        max_width = min(760, int(self.width() * 0.56)) if is_video_mode else min(940, int(self.width() * 0.68))
+        min_width = 300 if is_video_mode else 360
         self._subtitle_font_size_px = 22 if is_video_mode else 28
         self.subtitle.setStyleSheet(
             f"color: {self._current_subtitle_color}; font-size: {self._subtitle_font_size_px}px;"
@@ -629,25 +628,25 @@ class EmotionAILiveAnalyzer(QMainWindow):
         if text:
             metrics = self.subtitle.fontMetrics()
             bounds = metrics.boundingRect(0, 0, max_width - 32, 800, int(Qt.TextFlag.TextWordWrap), text)
-            extra_w = 36 if is_video_mode else 44
-            extra_h = 22 if is_video_mode else 28
-            min_h = 52 if is_video_mode else 64
-            max_h = 140 if is_video_mode else 168
+            extra_w = 52 if is_video_mode else 64
+            extra_h = 30 if is_video_mode else 36
+            min_h = 70 if is_video_mode else 84
+            max_h = 190 if is_video_mode else 228
             panel_width = max(min_width, min(max_width, bounds.width() + extra_w))
             panel_height = max(min_h, min(max_h, bounds.height() + extra_h))
         else:
             panel_width = min_width
-            panel_height = 52 if is_video_mode else 64
+            panel_height = 70 if is_video_mode else 84
 
         x = int((self.width() - panel_width) / 2)
         controls_gap = 18 if is_video_mode else (92 if self.player_controls.isVisible() else 28)
         y = self.height() - panel_height - controls_gap
         self.subtitle_panel.setGeometry(x, y, panel_width, panel_height)
-        self.subtitle.setGeometry(16, 10, panel_width - 32, panel_height - 20)
+        self.subtitle.setGeometry(20, 12, panel_width - 40, panel_height - 24)
 
     def _position_video_emotion_panel(self) -> None:
-        width = 240
-        height = 128
+        width = 300
+        height = 176
         x = 18
         y = self.title_bar.geometry().bottom() + 12
         self.video_emotion_panel.setGeometry(x, y, width, height)
@@ -746,9 +745,7 @@ class EmotionAILiveAnalyzer(QMainWindow):
         )
         self.set_emotion_state(final_emotion, face_confidence, voice_confidence)
         self._update_video_emotion_panel(final_emotion, face_emotion, text_emotion)
-        self.status_chip.setText(
-            f"Final: {final_emotion} | Face: {face_emotion} | Text: {text_emotion}"
-        )
+        self.status_chip.setText("Video analysis running")
         return output
 
     def _update_video_emotion_panel(self, final_emotion: str, face_emotion: str, voice_emotion: str) -> None:
@@ -815,9 +812,7 @@ class EmotionAILiveAnalyzer(QMainWindow):
         )
         self.set_emotion_state(final_emotion, confidence, voice_confidence)
         if results:
-            self.status_chip.setText(
-                f"Final: {final_emotion} | Face: {emotion} | Voice: {self._live_text_emotion}"
-            )
+            self.status_chip.setText("Live analysis running")
         else:
             self.status_chip.setText("No face")
         return output
@@ -1081,8 +1076,9 @@ class EmotionAILiveAnalyzer(QMainWindow):
         self._tick_loading_animation()
 
     def _tick_loading_animation(self) -> None:
-        dots = "." * ((self._loading_frame % 3) + 1)
-        text = f"{self._loading_stage}{dots}".strip()
+        spinner = ("◜", "◠", "◝", "◞", "◡", "◟")
+        spin = spinner[self._loading_frame % len(spinner)]
+        text = f"{self._loading_stage} {spin}".strip()
         if text:
             self.status_chip.setText(text)
         self._loading_frame += 1
@@ -1297,9 +1293,7 @@ class EmotionAILiveAnalyzer(QMainWindow):
             self._source_mode == "video" and self.state.show_video_emotion_panel
         )
 
-        self.status_chip.setText(
-            f"Camera {self.state.camera_index} | Mic {self.state.mic_device if self.state.mic_device is not None else 'default'}"
-        )
+        self.status_chip.setText("Settings updated")
         self.set_subtitle("Devices updated")
 
     def _default_model_path(self) -> Optional[str]:

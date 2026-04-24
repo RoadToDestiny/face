@@ -12,7 +12,7 @@ venv/
 data/
 vosk-model*/
 models/vosk-model*/
-rubert-base-cased-russian-sentiment/
+seararubert-base-cased-russian-sentiment/
 # IDE
 .idea/
 .vscode/
