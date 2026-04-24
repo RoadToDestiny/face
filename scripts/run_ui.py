@@ -25,8 +25,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
-    QSpacerItem,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
